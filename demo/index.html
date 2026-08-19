@@ -1,0 +1,43 @@
+<!DOCTYPE html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>PiP addon demo</title>
+    <style>
+      body {
+        font: 16px/1.5 system-ui, sans-serif;
+        margin: 32px auto;
+        max-width: 880px;
+      }
+      video {
+        background: #000;
+        max-width: 100%;
+        width: 720px;
+      }
+      .tiny {
+        width: 120px;
+      }
+    </style>
+  </head>
+  <body>
+    <h1>Picture-in-Picture demo</h1>
+    <p>Hover the video to show the Firefox-style toggle. Use Ctrl+Shift+] or the toolbar button.</p>
+    <video
+      id="main"
+      controls
+      crossorigin="anonymous"
+      src="https://interactive-examples.mdn.mozilla.net/media/cc0-videos/flower.mp4"
+    >
+      <track
+        kind="captions"
+        srclang="en"
+        label="English"
+        default
+        src="data:text/vtt,WEBVTT%0A%0A00:00:00.000 --> 00:00:08.000%0ADemo captions from WebVTT"
+      />
+    </video>
+    <h2>Short clip (toggle hidden unless always-show is on)</h2>
+    <video class="tiny" controls src="https://interactive-examples.mdn.mozilla.net/media/cc0-videos/flower.mp4"></video>
+  </body>
+</html>

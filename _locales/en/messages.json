@@ -1,0 +1,77 @@
+{
+  "extName": {
+    "message": "Picture-in-Picture"
+  },
+  "extDescription": {
+    "message": "Firefox-style Picture-in-Picture for Chrome: hover toggle, full playback controls, captions, shortcuts, and auto-PiP."
+  },
+  "actionTitle": {
+    "message": "Watch in Picture-in-Picture"
+  },
+  "commandToggle": {
+    "message": "Toggle Picture-in-Picture"
+  },
+  "contextWatch": {
+    "message": "Watch in Picture-in-Picture"
+  },
+  "toggleLabel": {
+    "message": "Watch in Picture-in-Picture"
+  },
+  "toggleShort": {
+    "message": "Picture-in-Picture"
+  },
+  "placeholderText": {
+    "message": "This video is playing in Picture-in-Picture"
+  },
+  "placeholderReturn": {
+    "message": "Return this tab"
+  },
+  "optionsTitle": {
+    "message": "Picture-in-Picture settings"
+  },
+  "optionsIntro": {
+    "message": "These options match Firefox Picture-in-Picture, including the extra controls in the player window."
+  },
+  "toggleEnabled": {
+    "message": "Show the Picture-in-Picture toggle on videos"
+  },
+  "alwaysShowToggle": {
+    "message": "Always show the toggle (ignore the 45-second and size checks)"
+  },
+  "minVideoSecs": {
+    "message": "Minimum video length for the toggle (seconds)"
+  },
+  "respectDisable": {
+    "message": "Respect websites that disable Picture-in-Picture"
+  },
+  "autoPip": {
+    "message": "Automatically open Picture-in-Picture when switching tabs"
+  },
+  "keyboardControls": {
+    "message": "Enable keyboard controls in the Picture-in-Picture window"
+  },
+  "captionsEnabled": {
+    "message": "Show captions and subtitles in Picture-in-Picture"
+  },
+  "captionFontSize": {
+    "message": "Caption font size"
+  },
+  "pauseOnClose": {
+    "message": "Pause the video when the Picture-in-Picture window is closed"
+  },
+  "showPlaceholder": {
+    "message": "Show a placeholder on the original video while Picture-in-Picture is open"
+  },
+  "shortcutsHeading": {
+    "message": "Shortcuts"
+  },
+  "shortcutToggle": {
+    "message": "Ctrl+Shift+] (macOS: ⌘⇧⌥]) opens or closes Picture-in-Picture for the most relevant video. Chrome also assigns Ctrl+Shift+9, which you can change at chrome://extensions/shortcuts."
+  },
+  "shortcutPlayer": {
+    "message": "In the player: Space play/pause, ←/→ seek 5 seconds, Ctrl+←/→ seek 10%, ↑/↓ volume, Ctrl+↑/↓ unmute/mute, Home/End, F fullscreen, Ctrl+W close, Shift+Esc or Shift+click close without pausing."
+  },
+  "saved": {
+    "message": "Settings saved"
+  }
+}

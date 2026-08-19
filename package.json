@@ -1,0 +1,9 @@
+{
+  "name": "pip-addon",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "build": "node scripts/bundle-content.mjs",
+    "test": "node scripts/bundle-content.mjs && node --test tests/*.test.js"
+  }
+}

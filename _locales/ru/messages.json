@@ -1,0 +1,77 @@
+{
+  "extName": {
+    "message": "Картинка в картинке"
+  },
+  "extDescription": {
+    "message": "Picture-in-Picture как в Firefox для Chrome: кнопка на видео, полные элементы управления, субтитры, сочетания клавиш и авто-PiP."
+  },
+  "actionTitle": {
+    "message": "Смотреть в режиме «Картинка в картинке»"
+  },
+  "commandToggle": {
+    "message": "Включить или выключить «Картинка в картинке»"
+  },
+  "contextWatch": {
+    "message": "Смотреть в режиме «Картинка в картинке»"
+  },
+  "toggleLabel": {
+    "message": "Смотреть в режиме «Картинка в картинке»"
+  },
+  "toggleShort": {
+    "message": "Картинка в картинке"
+  },
+  "placeholderText": {
+    "message": "Это видео воспроизводится в режиме «Картинка в картинке»"
+  },
+  "placeholderReturn": {
+    "message": "Вернуться на вкладку"
+  },
+  "optionsTitle": {
+    "message": "Настройки «Картинка в картинке»"
+  },
+  "optionsIntro": {
+    "message": "Эти параметры повторяют Firefox Picture-in-Picture, включая дополнительные кнопки в окне проигрывателя."
+  },
+  "toggleEnabled": {
+    "message": "Показывать кнопку Picture-in-Picture на видео"
+  },
+  "alwaysShowToggle": {
+    "message": "Всегда показывать кнопку (игнорировать проверки длительности и размера)"
+  },
+  "minVideoSecs": {
+    "message": "Минимальная длительность видео для кнопки (секунды)"
+  },
+  "respectDisable": {
+    "message": "Учитывать сайты, которые отключают Picture-in-Picture"
+  },
+  "autoPip": {
+    "message": "Автоматически открывать Picture-in-Picture при переключении вкладок"
+  },
+  "keyboardControls": {
+    "message": "Включить управление с клавиатуры в окне Picture-in-Picture"
+  },
+  "captionsEnabled": {
+    "message": "Показывать субтитры в окне Picture-in-Picture"
+  },
+  "captionFontSize": {
+    "message": "Размер шрифта субтитров"
+  },
+  "pauseOnClose": {
+    "message": "Ставить видео на паузу при закрытии окна Picture-in-Picture"
+  },
+  "showPlaceholder": {
+    "message": "Показывать заглушку на исходном видео, пока открыто Picture-in-Picture"
+  },
+  "shortcutsHeading": {
+    "message": "Сочетания клавиш"
+  },
+  "shortcutToggle": {
+    "message": "Ctrl+Shift+] (macOS: ⌘⇧⌥]) открывает или закрывает Picture-in-Picture для самого подходящего видео. Chrome также назначает Ctrl+Shift+9 — его можно изменить на chrome://extensions/shortcuts."
+  },
+  "shortcutPlayer": {
+    "message": "В проигрывателе: Пробел — пауза, ←/→ — ±5 с, Ctrl+←/→ — ±10%, ↑/↓ — громкость, Ctrl+↑/↓ — звук, Home/End, F — полный экран, Ctrl+W — закрыть, Shift+Esc или Shift+клик — закрыть без паузы."
+  },
+  "saved": {
+    "message": "Настройки сохранены"
+  }
+}
