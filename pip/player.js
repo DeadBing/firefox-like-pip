@@ -198,7 +198,7 @@ export class PipPlayer {
     try {
       pipVideo.srcObject = this.stream;
       pipVideo.muted = true;
-      await pipVideo.play().catch(() => {});
+      pipVideo.play().catch(() => {});
     } catch {
       if (this.pipWindow && !this.pipWindow.closed) {
         this.pipWindow.close();

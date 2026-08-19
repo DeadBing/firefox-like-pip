@@ -40,6 +40,31 @@ function toggleInTab(tab, frameId) {
   });
 }
 
+function relayToFrame(message, sender, sendResponse, frameId) {
+  if (!sender.tab?.id || !Number.isInteger(frameId)) {
+    sendResponse({ ok: false, reason: "Target frame is unavailable" });
+    return false;
+  }
+  chrome.tabs
+    .sendMessage(
+      sender.tab.id,
+      { ...message, sourceFrameId: sender.frameId },
+      { frameId }
+    )
+    .then(sendResponse)
+    .catch((error) => sendResponse({ ok: false, reason: String(error?.message || error) }));
+  return true;
+}
+
+chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
+  if (message?.type === "PIP_REMOTE_OPEN") {
+    return relayToFrame(message, sender, sendResponse, 0);
+  }
+  if (message?.type === "PIP_REMOTE_RELAY") {
+    return relayToFrame(message, sender, sendResponse, message.targetFrameId);
+  }
+});
+
 chrome.runtime.onInstalled.addListener(async () => {
   await ensureDefaults();
   createContextMenu();
