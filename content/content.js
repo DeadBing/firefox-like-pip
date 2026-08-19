@@ -12,6 +12,19 @@ const TOGGLE_ID = "pip-addon-toggle";
 const PLACEHOLDER_ID = "pip-addon-placeholder";
 const SAMPLE_MS = 80;
 
+function isDocumentPipWindow() {
+  if (window.matchMedia("(display-mode: picture-in-picture)").matches) {
+    return true;
+  }
+  try {
+    return window.opener?.documentPictureInPicture?.window === window;
+  } catch {
+    return false;
+  }
+}
+
+const IS_DOCUMENT_PIP = isDocumentPipWindow();
+
 let settings = { ...DEFAULT_SETTINGS };
 loadSettings().then((next) => {
   settings = next;
@@ -185,7 +198,7 @@ function sampleMouse() {
 }
 
 function startSampling() {
-  if (sampleTimer) {
+  if (IS_DOCUMENT_PIP || sampleTimer) {
     return;
   }
   sampleTimer = window.setInterval(sampleMouse, SAMPLE_MS);
@@ -247,6 +260,9 @@ function attachPlayer(nextPlayer, video) {
 }
 
 async function toggleVideo(video) {
+  if (IS_DOCUMENT_PIP) {
+    return { ok: false, reason: "pip-window" };
+  }
   if (!video) {
     return { ok: false, reason: "no-video" };
   }
@@ -326,6 +342,9 @@ function getBestVideoScore() {
 }
 
 function registerAutoPip() {
+  if (IS_DOCUMENT_PIP) {
+    return;
+  }
   try {
     navigator.mediaSession.setActionHandler("enterpictureinpicture", async () => {
       if (!settings.autoPipOnTabSwitch || player) {

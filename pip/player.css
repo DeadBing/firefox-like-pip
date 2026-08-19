@@ -2,7 +2,7 @@
   --player-bg-color: #000;
   --player-control-icon-fill: #fff;
   --player-control-item-half-width: clamp(calc(16px / 2), calc(10vmax / 2), calc(32px / 2));
-  --player-control-item-height: clamp(16px, 10vmax, 32px);
+  --player-control-item-height: clamp(24px, 10vmax, 32px);
   --close-btn-fill-color: #000;
   --controls-bottom-distance: 15px;
   --controls-bottom-upper-height: 30px;
@@ -134,45 +134,48 @@ body {
 
 .control-button {
   background-color: transparent;
-  background-position: center;
-  background-repeat: no-repeat;
-  background-size: 60%;
   border-radius: 4px;
+  box-sizing: border-box;
   color: var(--player-control-icon-fill);
+  display: grid;
   fill: var(--player-control-icon-fill);
   height: var(--player-control-item-height);
-  max-width: 32px;
-  min-width: 16px;
+  line-height: 0;
   padding: 0;
-  width: 10vmax;
+  place-items: center;
+  position: relative;
+  width: var(--player-control-item-height);
 }
 
 .control-button svg {
   display: block;
-  height: 60%;
-  margin: 20% auto;
-  width: 60%;
+  height: 18px;
+  margin: 0;
+  width: 18px;
 }
 
 .control-button:hover:enabled {
   background-color: rgb(255 255 255 / 25%);
 }
 
-.control-item:hover::after,
-.control-item:focus-visible::after {
+.control-button[data-tooltip]:hover::after,
+.control-button[data-tooltip]:focus-visible::after {
   background: #000;
   border-radius: 4px;
-  bottom: 3em;
+  bottom: calc(100% + 8px);
   color: #fff;
   content: attr(data-tooltip);
-  display: inline-block;
   font-family: system-ui, sans-serif;
   font-size: 12px;
+  left: 50%;
+  line-height: 1.2;
   padding: 0.4em 0.5em;
   pointer-events: none;
-  position: relative;
+  position: absolute;
+  transform: translateX(-50%);
   white-space: nowrap;
   width: max-content;
+  z-index: 5;
 }
 
 #close:hover::after,
@@ -180,7 +183,28 @@ body {
 #close:focus-visible::after,
 #unpip:focus-visible::after {
   bottom: auto;
-  top: 2.6em;
+  top: calc(100% + 8px);
+}
+
+#close::after {
+  left: auto;
+  right: 0;
+  transform: none;
+}
+
+#unpip::after {
+  left: 0;
+  transform: none;
+}
+
+body.mac #close::after {
+  left: 0;
+  right: auto;
+}
+
+body.mac #unpip::after {
+  left: auto;
+  right: 0;
 }
 
 #controls:hover .control-item,
