@@ -27,6 +27,12 @@ const ICONS = {
     '<svg viewBox="0 0 16 16" aria-hidden="true"><path fill="currentColor" d="M5.5 2.5v3H2.5V4h1.5V2.5zm5 0H13V4h1.5v1.5H10.5zM2.5 10.5h3V13H4v-1.5H2.5zm8 0H13.5V9H12v1.5h-1.5z"/></svg>',
 };
 
+Object.assign(ICONS, {
+  muted:
+    '<svg viewBox="0 0 16 16" aria-hidden="true"><path fill="currentColor" d="M1.5 6h2.8L8 3v10l-3.7-3H1.5z"/><path fill="none" stroke="currentColor" stroke-linecap="round" stroke-width="1.5" d="m10.5 5.5 4 5m0-5-4 5"/></svg>',
+  cc: '<svg viewBox="0 0 16 16" aria-hidden="true"><rect x="1.5" y="3.25" width="13" height="9.5" rx="1.5" fill="none" stroke="currentColor" stroke-width="1.3"/><path fill="none" stroke="currentColor" stroke-linecap="round" stroke-width="1.3" d="M6.4 6.5a2 2 0 1 0 0 3m5.4-3a2 2 0 1 0 0 3"/></svg>',
+});
+
 function button(id, tooltip, icon, extraClass = "") {
   return `<button type="button" id="${id}" class="control-item control-button ${extraClass}" data-tooltip="${tooltip}">${icon}</button>`;
 }
