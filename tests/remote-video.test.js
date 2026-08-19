@@ -1,6 +1,30 @@
 import { describe, it } from "node:test";
 import assert from "node:assert/strict";
-import { RemoteVideo, snapshotVideo } from "../lib/remote-video.js";
+import {
+  preserveVideoQuality,
+  RemoteVideo,
+  snapshotVideo,
+} from "../lib/remote-video.js";
+
+it("preserves source resolution in the WebRTC bridge", async () => {
+  const track = {};
+  let applied;
+  const sender = {
+    getParameters: () => ({ encodings: [{}] }),
+    setParameters: async (parameters) => {
+      applied = parameters;
+    },
+  };
+
+  await preserveVideoQuality(track, sender);
+
+  assert.equal(track.contentHint, "detail");
+  assert.equal(applied.degradationPreference, "maintain-resolution");
+  assert.deepEqual(applied.encodings, [{
+    scaleResolutionDownBy: 1,
+    maxBitrate: 20_000_000,
+  }]);
+});
 
 describe("RemoteVideo", () => {
   it("mirrors state and forwards player commands", async () => {

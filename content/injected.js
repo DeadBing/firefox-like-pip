@@ -297,6 +297,17 @@ function snapshotVideo(video, title = "") {
   };
 }
 
+async function preserveVideoQuality(track, sender) {
+  track.contentHint = "detail";
+  const parameters = sender.getParameters();
+  parameters.degradationPreference = "maintain-resolution";
+  for (const encoding of parameters.encodings) {
+    encoding.scaleResolutionDownBy = 1;
+    encoding.maxBitrate = 20_000_000;
+  }
+  await sender.setParameters(parameters);
+}
+
 class RemoteVideo extends EventTarget {
   constructor(stream, state, send) {
     super();
@@ -1559,7 +1570,8 @@ async function openRemoteSource(video) {
   const sessionId = crypto.randomUUID();
   const connection = new RTCPeerConnection({ iceServers: [] });
   for (const track of tracks) {
-    connection.addTrack(track, stream);
+    const sender = connection.addTrack(track, stream);
+    await preserveVideoQuality(track, sender).catch(() => {});
   }
 
   try {

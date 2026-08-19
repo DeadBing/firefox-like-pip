@@ -6,7 +6,11 @@ import {
   shouldShowPictureInPictureToggle,
   scoreVideo,
 } from "../lib/video-utils.js";
-import { RemoteVideo, snapshotVideo } from "../lib/remote-video.js";
+import {
+  preserveVideoQuality,
+  RemoteVideo,
+  snapshotVideo,
+} from "../lib/remote-video.js";
 import { isToggleShortcut } from "../lib/keys.js";
 import { PipPlayer } from "../pip/player.js";
 
@@ -354,7 +358,8 @@ async function openRemoteSource(video) {
   const sessionId = crypto.randomUUID();
   const connection = new RTCPeerConnection({ iceServers: [] });
   for (const track of tracks) {
-    connection.addTrack(track, stream);
+    const sender = connection.addTrack(track, stream);
+    await preserveVideoQuality(track, sender).catch(() => {});
   }
 
   try {
