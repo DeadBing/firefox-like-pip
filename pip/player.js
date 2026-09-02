@@ -49,7 +49,9 @@ function button(id, tooltip, icon, extraClass = "") {
 function playerMarkup(strings) {
   return `
     <div class="player-holder">
-      <video id="pip-video" playsinline disablepictureinpicture></video>
+      <div class="video-stage">
+        <video id="pip-video" playsinline disablepictureinpicture></video>
+      </div>
       <div id="captions"></div>
       <div id="controls" showing>
         ${button("unpip", strings.unpip, ICONS.unpip)}
@@ -163,6 +165,19 @@ export class PipPlayer {
 
   desiredInnerSize() {
     return pipWindowSize(this.sourceVideo, undefined, undefined, this.stream);
+  }
+
+  applyVideoAspect() {
+    const video = this.pipWindow && !this.pipWindow.closed ? this.qs("pip-video") : null;
+    if (!video) {
+      return;
+    }
+    const { width, height, ratio } = this.contentSize();
+    if (!ratio) {
+      return;
+    }
+    video.style.aspectRatio = `${width} / ${height}`;
+    this.pipWindow.document.documentElement.style.setProperty("--pip-aspect", String(ratio));
   }
 
   fitPipWindow({ mode = "desired" } = {}) {
@@ -297,6 +312,7 @@ export class PipPlayer {
     this.bindSource();
     this.bindControls();
     this.sync();
+    this.applyVideoAspect();
     this.revealControls(true);
     this.fitPipWindow({ mode: "grow" });
     return { mode: "document", window: this.pipWindow };
@@ -352,6 +368,7 @@ export class PipPlayer {
     }
     this.bindSource();
     this.sync();
+    this.applyVideoAspect();
     this.fitPipWindow({ mode: "desired" });
     return { ok: true, mode: "document" };
   }
@@ -399,9 +416,13 @@ export class PipPlayer {
     }
     this.listenSource(this.sourceVideo, "loadedmetadata", () => {
       this.sync();
+      this.applyVideoAspect();
       this.fitPipWindow({ mode: "desired" });
     });
-    this.listenSource(this.sourceVideo, "resize", () => this.fitPipWindow({ mode: "desired" }));
+    this.listenSource(this.sourceVideo, "resize", () => {
+      this.applyVideoAspect();
+      this.fitPipWindow({ mode: "desired" });
+    });
     this.listenSource(this.sourceVideo, "emptied", () => this.close({ pause: false, reason: "emptied" }));
     const track = this.stream?.getVideoTracks?.()[0];
     if (track?.addEventListener) {
