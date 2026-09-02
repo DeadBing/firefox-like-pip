@@ -3,7 +3,7 @@
   <head>
     <meta charset="utf-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1" />
-    <title>Iframe player fixture</title>
+    <title>Cross-origin iframe fixture</title>
     <style>
       body {
         font: 16px/1.5 system-ui, sans-serif;
@@ -23,15 +23,15 @@
     </style>
   </head>
   <body>
-    <h1>Iframe embed fixture</h1>
+    <h1>Cross-origin iframe fixture</h1>
     <p>
-      Same layout as Alloha-style sites: the <code>&lt;video&gt;</code> lives in a child frame.
-      This iframe is same-origin, so Picture-in-Picture captures the element from the top
-      frame (no WebRTC encode). The clone should show a sharp teal “IFRAME PLAYER” card.
-      For the YouTube-embed path, use <a href="embed-cross-origin.html">the cross-origin fixture</a>.
+      Open this file from <code>http://127.0.0.1</code>. The player iframe is
+      <code>http://localhost</code> — a different origin — so Picture-in-Picture has to
+      re-encode through the WebRTC bridge (the YouTube-embed / Alloha path). The clone
+      should stay sharp: “IFRAME PLAYER” and the TL/TR/BL/BR marks readable, not VGA-blocky.
     </p>
     <div class="playeralloha video-responsive">
-      <iframe src="embed-player.html" allowfullscreen></iframe>
+      <iframe src="http://localhost:8765/demo/embed-player.html" allowfullscreen></iframe>
     </div>
   </body>
 </html>

@@ -1,7 +1,9 @@
 import { describe, it } from "node:test";
 import assert from "node:assert/strict";
 import {
+  applyTrackResolution,
   attachStreamToVideo,
+  capturedSizeLooksDownscaled,
   captureVideoStream,
   shouldUseNativeVideoPip,
   streamVideoTrack,
@@ -83,16 +85,108 @@ describe("waitForVideoTrack", () => {
   });
 });
 
+describe("applyTrackResolution", () => {
+  it("asks the captured track for the decoded video size", async () => {
+    const constraints = [];
+    const track = {
+      applyConstraints: async (next) => {
+        constraints.push(next);
+      },
+    };
+    await applyTrackResolution(track, { videoWidth: 1920, videoHeight: 800 });
+    assert.equal(track.contentHint, "detail");
+    assert.deepEqual(constraints[0].height, { ideal: 800 });
+  });
+});
+
+describe("capturedSizeLooksDownscaled", () => {
+  it("is true when the track is much smaller than the decoded frames", () => {
+    assert.equal(
+      capturedSizeLooksDownscaled(
+        { videoWidth: 1280, videoHeight: 720, clientWidth: 880, clientHeight: 360 },
+        { getSettings: () => ({ width: 880, height: 360 }) }
+      ),
+      true
+    );
+    assert.equal(
+      capturedSizeLooksDownscaled(
+        { videoWidth: 1280, videoHeight: 720, clientWidth: 1280, clientHeight: 720 },
+        { getSettings: () => ({ width: 1280, height: 720 }) }
+      ),
+      false
+    );
+  });
+});
+
 describe("captureVideoStream", () => {
   it("uses the element capture when a video track exists", () => {
     const stream = {
-      getVideoTracks: () => [{ readyState: "live", kind: "video" }],
+      getVideoTracks: () => [{ readyState: "live", kind: "video", getSettings: () => ({ width: 1280, height: 720 }) }],
       getTracks: () => [],
     };
-    assert.deepEqual(captureVideoStream({ captureStream: () => stream }), {
-      stream,
-      mode: "element",
-    });
+    assert.deepEqual(
+      captureVideoStream({
+        tagName: "VIDEO",
+        videoWidth: 1280,
+        videoHeight: 720,
+        clientWidth: 1280,
+        clientHeight: 720,
+        captureStream: () => stream,
+      }),
+      {
+        stream,
+        mode: "element",
+      }
+    );
+  });
+
+  it("paints a full-res canvas when captureStream matches a small on-page box", () => {
+    const stopped = [];
+    const stream = {
+      getVideoTracks: () => [{ readyState: "live", kind: "video", getSettings: () => ({ width: 640, height: 360 }) }],
+      getTracks: () => [{ stop: () => stopped.push("stop") }],
+    };
+    const frames = [];
+    const context = {
+      drawImage: (...args) => frames.push(args),
+      getImageData: () => ({ data: [1, 2, 3, 4] }),
+    };
+    const previous = globalThis.document;
+    globalThis.document = {
+      createElement: () => ({
+        width: 0,
+        height: 0,
+        getContext: () => context,
+        captureStream: () => ({
+          getTracks: () => [{ stop() {} }],
+        }),
+      }),
+    };
+    globalThis.requestAnimationFrame = (fn) => {
+      fn();
+      return 1;
+    };
+    try {
+      const result = captureVideoStream({
+        tagName: "VIDEO",
+        videoWidth: 1920,
+        videoHeight: 1080,
+        clientWidth: 640,
+        clientHeight: 360,
+        readyState: 4,
+        currentSrc: "blob:https://site.example/1",
+        captureStream: () => stream,
+      });
+      assert.equal(result.mode, "canvas");
+      assert.deepEqual(stopped, ["stop"]);
+      assert.equal(frames.length > 0, true);
+    } finally {
+      if (previous === undefined) {
+        delete globalThis.document;
+      } else {
+        globalThis.document = previous;
+      }
+    }
   });
 
   it("throws TAINTED when capture is blocked and paint is tainted", () => {

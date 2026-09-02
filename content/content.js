@@ -7,7 +7,8 @@ import {
   scoreVideo,
 } from "../lib/video-utils.js";
 import {
-  preserveVideoQuality,
+  addHighQualityVideoTrack,
+  preserveConnectionQuality,
   RemoteVideo,
   snapshotVideo,
 } from "../lib/remote-video.js";
@@ -273,6 +274,53 @@ function hidePlaceholder() {
   document.getElementById(PLACEHOLDER_ID)?.remove();
 }
 
+function isSameOriginWithTop() {
+  try {
+    return window !== window.top && Boolean(window.top.document);
+  } catch {
+    return false;
+  }
+}
+
+function collectAccessibleVideos() {
+  const found = [];
+  const walk = (win) => {
+    try {
+      collectVideos(win.document, found);
+      const count = win.frames.length;
+      for (let i = 0; i < count; i++) {
+        walk(win.frames[i]);
+      }
+    } catch {
+      /* Cross-origin child */
+    }
+  };
+  walk(window);
+  return found;
+}
+
+function matchChildVideo(src) {
+  const videos = collectAccessibleVideos();
+  if (src) {
+    const bySrc = videos.find((item) => (item.currentSrc || item.src) === src);
+    if (bySrc) {
+      return bySrc;
+    }
+  }
+  return pickBestVideo(videos, viewport());
+}
+
+async function openSameOriginChild(message) {
+  if (window !== window.top || IS_DOCUMENT_PIP) {
+    return { ok: false, reason: "not-top" };
+  }
+  const video = matchChildVideo(message.src);
+  if (!video) {
+    return { ok: false, reason: "no-video" };
+  }
+  return launchPlayer(video);
+}
+
 function waitForIceGathering(connection, timeoutMs = 1500) {
   if (connection.iceGatheringState === "complete") {
     return Promise.resolve();
@@ -393,12 +441,13 @@ async function openRemoteSource(video) {
   await flushIceBucket(iceBucket, sessionId, connection);
 
   for (const track of tracks) {
-    const sender = connection.addTrack(track, stream);
-    await preserveVideoQuality(track, sender).catch(() => {});
+    addHighQualityVideoTrack(connection, track, stream);
   }
 
   try {
+    await preserveConnectionQuality(connection, video);
     await connection.setLocalDescription(await connection.createOffer());
+    await preserveConnectionQuality(connection, video);
     await waitForIceGathering(connection);
     const response = await chrome.runtime.sendMessage({
       type: "PIP_REMOTE_OPEN",
@@ -411,6 +460,7 @@ async function openRemoteSource(video) {
     }
     await connection.setRemoteDescription(response.answer);
     await flushIceBucket(iceBucket, sessionId, connection);
+    await preserveConnectionQuality(connection, video);
 
     const sendState = () =>
       relayRemote(0, "state", sessionId, snapshotVideo(video, document.title));
@@ -420,6 +470,9 @@ async function openRemoteSource(video) {
       const next = connection.connectionState;
       const previous = iceState;
       iceState = next;
+      if (next === "connected") {
+        preserveConnectionQuality(connection, video);
+      }
       if (shouldCloseOnIceFailure(previous, next)) {
         cleanupRemoteSource();
       }
@@ -591,6 +644,21 @@ async function toggleVideo(video) {
     if (shouldUseNativeVideoPip(video)) {
       return launchPlayer(video, { nativeOnly: true });
     }
+    if (isSameOriginWithTop()) {
+      try {
+        const local = await chrome.runtime.sendMessage({
+          type: "PIP_SAME_ORIGIN_OPEN",
+          src: video.currentSrc || video.src || "",
+          state: snapshotVideo(video, document.title),
+        });
+        if (local?.ok) {
+          showPlaceholder(video);
+          return local;
+        }
+      } catch {
+        /* Fall through to the WebRTC bridge. */
+      }
+    }
     try {
       return await openRemoteSource(video);
     } catch (error) {
@@ -705,6 +773,10 @@ chrome.storage.onChanged.addListener((changes, area) => {
 chrome.runtime.onMessage.addListener((message, _sender, sendResponse) => {
   if (message?.type === "PIP_REMOTE_OPEN" && window === window.top && !IS_DOCUMENT_PIP) {
     openRemoteReceiver(message).then(sendResponse);
+    return true;
+  }
+  if (message?.type === "PIP_SAME_ORIGIN_OPEN" && window === window.top && !IS_DOCUMENT_PIP) {
+    openSameOriginChild(message).then(sendResponse);
     return true;
   }
   if (message?.type === "PIP_REMOTE_RELAY") {

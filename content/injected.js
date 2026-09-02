@@ -268,7 +268,7 @@ function collectVideos(root = document, into = []) {
 }
 
 /** Longest edge of a newly opened Document PiP window, in CSS pixels. */
-const PIP_MAX_EDGE = 480;
+const PIP_MAX_EDGE = 720;
 
 function videoContentSize(video, stream) {
   const track = stream?.getVideoTracks?.()?.[0];
@@ -438,6 +438,43 @@ function streamVideoTrack(stream) {
   return stream?.getVideoTracks?.()?.find((track) => track.readyState !== "ended") ?? null;
 }
 
+function isElementVideo(video) {
+  return typeof video?.tagName === "string" && video.tagName.toUpperCase() === "VIDEO";
+}
+
+/** True when captureStream / the on-page box is smaller than the decoded frames. */
+function capturedSizeLooksDownscaled(video, track) {
+  const decodedW = Number(video?.videoWidth) || 0;
+  const decodedH = Number(video?.videoHeight) || 0;
+  if (decodedW < 2 || decodedH < 2) {
+    return false;
+  }
+  const settings = typeof track?.getSettings === "function" ? track.getSettings() : {};
+  const capW = Number(settings.width) || Number(video?.clientWidth) || 0;
+  const capH = Number(settings.height) || Number(video?.clientHeight) || 0;
+  return (capW > 0 && capW < decodedW * 0.85) || (capH > 0 && capH < decodedH * 0.85);
+}
+
+/** Ask the captured track for the source's decoded size, not the on-page box. */
+async function applyTrackResolution(track, video) {
+  if (!track) {
+    return track;
+  }
+  track.contentHint = "detail";
+  const width = Number(video?.videoWidth) || 0;
+  const height = Number(video?.videoHeight) || 0;
+  if (width >= 2 && height >= 2 && typeof track.applyConstraints === "function") {
+    await track
+      .applyConstraints({
+        width: { ideal: width },
+        height: { ideal: height },
+        frameRate: { ideal: 60 },
+      })
+      .catch(() => {});
+  }
+  return track;
+}
+
 /** Copy inbound WebRTC tracks onto the stream the PiP <video> is bound to. */
 function adoptIncomingTrack(stream, event) {
   if (!stream?.addTrack || !event) {
@@ -530,15 +567,42 @@ function attachStreamToVideo(video, stream) {
   };
 }
 
-/** captureStream when possible; canvas pump when the element is readable but the track is missing. */
+/**
+ * captureStream() often matches the on-page box (a 360px iframe, a small
+ * YouTube player). Paint a full-resolution canvas clone when the decoded
+ * frames are larger and the element is not CORS-tainted.
+ */
 function captureVideoStream(video) {
+  let stream = null;
   try {
-    const stream = video.captureStream();
-    if (streamVideoTrack(stream)) {
-      return { stream, mode: "element" };
+    try {
+      stream = video.captureStream(0);
+    } catch (error) {
+      if (error?.name !== "TypeError") {
+        throw error;
+      }
+      stream = video.captureStream();
     }
-    for (const track of stream.getTracks?.() ?? []) {
-      track.stop();
+    const track = streamVideoTrack(stream);
+    if (track) {
+      applyTrackResolution(track, video);
+      const useCanvas =
+        isElementVideo(video) &&
+        capturedSizeLooksDownscaled(video, track) &&
+        !videoFrameCaptureBlocked(video) &&
+        !videoPaintIsTainted(video);
+      if (!useCanvas) {
+        return { stream, mode: "element" };
+      }
+      for (const item of stream.getTracks?.() ?? []) {
+        item.stop();
+      }
+      stream = null;
+    } else {
+      for (const item of stream.getTracks?.() ?? []) {
+        item.stop();
+      }
+      stream = null;
     }
   } catch {
     /* Fall through to a canvas clone when the element is not tainted. */
@@ -580,7 +644,12 @@ function startCanvasCapture(video) {
     globalThis.requestAnimationFrame(draw);
   };
   globalThis.requestAnimationFrame(draw);
-  const stream = canvas.captureStream(30);
+  let stream;
+  try {
+    stream = canvas.captureStream(0);
+  } catch {
+    stream = canvas.captureStream(60);
+  }
   const stop = stream.getTracks?.()[0];
   if (stop) {
     const original = stop.stop.bind(stop);
@@ -705,15 +774,105 @@ function snapshotVideo(video, title = "") {
   };
 }
 
-async function preserveVideoQuality(track, sender) {
-  track.contentHint = "detail";
+const HIGH_QUALITY_BITRATE = 25_000_000;
+
+const HIGH_QUALITY_ENCODING = {
+  scaleResolutionDownBy: 1,
+  maxBitrate: HIGH_QUALITY_BITRATE,
+  maxFramerate: 60,
+  priority: "high",
+  networkPriority: "high",
+};
+
+/** Put full-res encodings in the offer. addTrack + setParameters often runs too early (encodings is []). */
+function addHighQualityVideoTrack(connection, track, stream) {
+  if (typeof connection?.addTransceiver === "function") {
+    try {
+      return connection.addTransceiver(track, {
+        direction: "sendonly",
+        streams: stream ? [stream] : [],
+        sendEncodings: [{ ...HIGH_QUALITY_ENCODING }],
+      });
+    } catch {
+      /* Older Chromium rejected sendEncodings on addTransceiver. */
+    }
+  }
+  return connection.addTrack(track, stream);
+}
+
+async function preserveVideoQuality(track, sender, video) {
+  if (track) {
+    track.contentHint = "detail";
+    const width = Number(video?.videoWidth) || 0;
+    const height = Number(video?.videoHeight) || 0;
+    if (width >= 2 && height >= 2 && typeof track.applyConstraints === "function") {
+      await track
+        .applyConstraints({
+          width: { ideal: width },
+          height: { ideal: height },
+          frameRate: { ideal: 60 },
+        })
+        .catch(() => {});
+    }
+  }
+  if (!sender?.getParameters || !sender.setParameters) {
+    return;
+  }
   const parameters = sender.getParameters();
   parameters.degradationPreference = "maintain-resolution";
-  for (const encoding of parameters.encodings) {
-    encoding.scaleResolutionDownBy = 1;
-    encoding.maxBitrate = 20_000_000;
+  const encodings = parameters.encodings?.length ? parameters.encodings : [{}];
+  for (const encoding of encodings) {
+    encoding.scaleResolutionDownBy = HIGH_QUALITY_ENCODING.scaleResolutionDownBy;
+    encoding.maxBitrate = HIGH_QUALITY_ENCODING.maxBitrate;
+    encoding.maxFramerate = HIGH_QUALITY_ENCODING.maxFramerate;
+    encoding.priority = HIGH_QUALITY_ENCODING.priority;
+    encoding.networkPriority = HIGH_QUALITY_ENCODING.networkPriority;
   }
-  await sender.setParameters(parameters);
+  parameters.encodings = encodings;
+  try {
+    await sender.setParameters(parameters);
+  } catch {
+    /* Chrome rejects encodings that were not negotiated yet. */
+  }
+}
+
+function preferHighQualityCodecs(connection) {
+  const transceivers = connection?.getTransceivers?.() ?? [];
+  const caps = globalThis.RTCRtpSender?.getCapabilities?.("video");
+  if (!caps?.codecs?.length) {
+    return;
+  }
+  const isRepair = (codec) => /rtx|red|fec/i.test(String(codec.mimeType || ""));
+  const rank = (codec) => {
+    const mime = String(codec.mimeType || "").toLowerCase();
+    if (mime.includes("vp9")) {
+      return 0;
+    }
+    if (mime.includes("av1")) {
+      return 1;
+    }
+    if (mime.includes("h264")) {
+      return 2;
+    }
+    return 3;
+  };
+  const primary = caps.codecs.filter((codec) => !isRepair(codec));
+  const repair = caps.codecs.filter(isRepair);
+  const ordered = [...primary].sort((left, right) => rank(left) - rank(right)).concat(repair);
+  for (const transceiver of transceivers) {
+    if (transceiver.sender?.track?.kind === "video" || transceiver.receiver?.track?.kind === "video") {
+      transceiver.setCodecPreferences?.(ordered);
+    }
+  }
+}
+
+async function preserveConnectionQuality(connection, video) {
+  preferHighQualityCodecs(connection);
+  for (const sender of connection?.getSenders?.() ?? []) {
+    if (sender.track?.kind === "video") {
+      await preserveVideoQuality(sender.track, sender, video).catch(() => {});
+    }
+  }
 }
 
 class RemoteVideo extends EventTarget {
@@ -1244,7 +1403,7 @@ class PipPlayer {
       return this.openNative();
     }
     try {
-      this.stream = this.sourceVideo.captureStream();
+      this.stream = captureVideoStream(this.sourceVideo).stream;
     } catch {
       return this.openNative();
     }
@@ -1337,7 +1496,7 @@ class PipPlayer {
       return { ok: true, mode: "video" };
     }
     const pipVideo = this.qs("pip-video");
-    this.stream = video.captureStream();
+    this.stream = captureVideoStream(video).stream;
     this.attachPipMedia(pipVideo);
     await pipVideo.play().catch(() => {});
     if (!this.stillOpen()) {
@@ -2020,6 +2179,53 @@ function hidePlaceholder() {
   document.getElementById(PLACEHOLDER_ID)?.remove();
 }
 
+function isSameOriginWithTop() {
+  try {
+    return window !== window.top && Boolean(window.top.document);
+  } catch {
+    return false;
+  }
+}
+
+function collectAccessibleVideos() {
+  const found = [];
+  const walk = (win) => {
+    try {
+      collectVideos(win.document, found);
+      const count = win.frames.length;
+      for (let i = 0; i < count; i++) {
+        walk(win.frames[i]);
+      }
+    } catch {
+      /* Cross-origin child */
+    }
+  };
+  walk(window);
+  return found;
+}
+
+function matchChildVideo(src) {
+  const videos = collectAccessibleVideos();
+  if (src) {
+    const bySrc = videos.find((item) => (item.currentSrc || item.src) === src);
+    if (bySrc) {
+      return bySrc;
+    }
+  }
+  return pickBestVideo(videos, viewport());
+}
+
+async function openSameOriginChild(message) {
+  if (window !== window.top || IS_DOCUMENT_PIP) {
+    return { ok: false, reason: "not-top" };
+  }
+  const video = matchChildVideo(message.src);
+  if (!video) {
+    return { ok: false, reason: "no-video" };
+  }
+  return launchPlayer(video);
+}
+
 function waitForIceGathering(connection, timeoutMs = 1500) {
   if (connection.iceGatheringState === "complete") {
     return Promise.resolve();
@@ -2140,12 +2346,13 @@ async function openRemoteSource(video) {
   await flushIceBucket(iceBucket, sessionId, connection);
 
   for (const track of tracks) {
-    const sender = connection.addTrack(track, stream);
-    await preserveVideoQuality(track, sender).catch(() => {});
+    addHighQualityVideoTrack(connection, track, stream);
   }
 
   try {
+    await preserveConnectionQuality(connection, video);
     await connection.setLocalDescription(await connection.createOffer());
+    await preserveConnectionQuality(connection, video);
     await waitForIceGathering(connection);
     const response = await chrome.runtime.sendMessage({
       type: "PIP_REMOTE_OPEN",
@@ -2158,6 +2365,7 @@ async function openRemoteSource(video) {
     }
     await connection.setRemoteDescription(response.answer);
     await flushIceBucket(iceBucket, sessionId, connection);
+    await preserveConnectionQuality(connection, video);
 
     const sendState = () =>
       relayRemote(0, "state", sessionId, snapshotVideo(video, document.title));
@@ -2167,6 +2375,9 @@ async function openRemoteSource(video) {
       const next = connection.connectionState;
       const previous = iceState;
       iceState = next;
+      if (next === "connected") {
+        preserveConnectionQuality(connection, video);
+      }
       if (shouldCloseOnIceFailure(previous, next)) {
         cleanupRemoteSource();
       }
@@ -2338,6 +2549,21 @@ async function toggleVideo(video) {
     if (shouldUseNativeVideoPip(video)) {
       return launchPlayer(video, { nativeOnly: true });
     }
+    if (isSameOriginWithTop()) {
+      try {
+        const local = await chrome.runtime.sendMessage({
+          type: "PIP_SAME_ORIGIN_OPEN",
+          src: video.currentSrc || video.src || "",
+          state: snapshotVideo(video, document.title),
+        });
+        if (local?.ok) {
+          showPlaceholder(video);
+          return local;
+        }
+      } catch {
+        /* Fall through to the WebRTC bridge. */
+      }
+    }
     try {
       return await openRemoteSource(video);
     } catch (error) {
@@ -2452,6 +2678,10 @@ chrome.storage.onChanged.addListener((changes, area) => {
 chrome.runtime.onMessage.addListener((message, _sender, sendResponse) => {
   if (message?.type === "PIP_REMOTE_OPEN" && window === window.top && !IS_DOCUMENT_PIP) {
     openRemoteReceiver(message).then(sendResponse);
+    return true;
+  }
+  if (message?.type === "PIP_SAME_ORIGIN_OPEN" && window === window.top && !IS_DOCUMENT_PIP) {
+    openSameOriginChild(message).then(sendResponse);
     return true;
   }
   if (message?.type === "PIP_REMOTE_RELAY") {

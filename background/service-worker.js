@@ -57,7 +57,7 @@ function relayToFrame(message, sender, sendResponse, frameId) {
 }
 
 chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
-  if (message?.type === "PIP_REMOTE_OPEN") {
+  if (message?.type === "PIP_REMOTE_OPEN" || message?.type === "PIP_SAME_ORIGIN_OPEN") {
     return relayToFrame(message, sender, sendResponse, 0);
   }
   if (message?.type === "PIP_REMOTE_RELAY") {
