@@ -12,6 +12,7 @@ import {
   videoContentSize,
 } from "../lib/video-utils.js";
 import { attachStreamToVideo } from "../lib/media-stream.js";
+import { sourceWasRemoved } from "../lib/remote-bridge.js";
 
 const ICONS = {
   close:
@@ -377,7 +378,12 @@ export class PipPlayer {
     doc.head.replaceChildren();
     doc.body.replaceChildren();
     doc.documentElement.lang = document.documentElement.lang || "en";
+    doc.documentElement.style.background = "#000";
     doc.title = this.sourceVideo.title || document.title || "Picture-in-Picture";
+    const boot = doc.createElement("style");
+    boot.textContent =
+      "html,body{background:#000;height:100%;margin:0;overflow:hidden;width:100%}#pip-video{background:#000;height:100%;object-fit:contain;width:100%}";
+    doc.head.append(boot);
     const style = doc.createElement("link");
     style.rel = "stylesheet";
     style.href = chrome.runtime.getURL("pip/player.css");
@@ -427,7 +433,11 @@ export class PipPlayer {
       this.applyVideoAspect();
       this.fitPipWindow({ mode: "desired" });
     });
-    this.listenSource(this.sourceVideo, "emptied", () => this.close({ pause: false, reason: "emptied" }));
+    this.listenSource(this.sourceVideo, "emptied", () => {
+      if (sourceWasRemoved(this.sourceVideo)) {
+        this.close({ pause: false, reason: "emptied" });
+      }
+    });
     const track = this.stream?.getVideoTracks?.()[0];
     if (track?.addEventListener) {
       const onTrackResize = () => this.fitPipWindow({ mode: "desired" });
@@ -718,8 +728,11 @@ export class PipPlayer {
     if (!this.stream) {
       return;
     }
-    for (const track of this.stream.getTracks()) {
-      track.stop();
+    const bridged = this.sourceVideo?.stream === this.stream;
+    if (!bridged) {
+      for (const track of this.stream.getTracks?.() ?? []) {
+        track.stop();
+      }
     }
     this.stream = null;
   }

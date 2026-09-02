@@ -438,6 +438,31 @@ function streamVideoTrack(stream) {
   return stream?.getVideoTracks?.()?.find((track) => track.readyState !== "ended") ?? null;
 }
 
+/** Copy inbound WebRTC tracks onto the stream the PiP <video> is bound to. */
+function adoptIncomingTrack(stream, event) {
+  if (!stream?.addTrack || !event) {
+    return streamVideoTrack(stream);
+  }
+  const pending = [];
+  for (const incoming of event.streams ?? []) {
+    for (const track of incoming.getTracks?.() ?? []) {
+      pending.push(track);
+    }
+  }
+  if (event.track) {
+    pending.push(event.track);
+  }
+  const have = new Set(stream.getTracks?.() ?? []);
+  for (const track of pending) {
+    if (!track || have.has(track)) {
+      continue;
+    }
+    stream.addTrack(track);
+    have.add(track);
+  }
+  return streamVideoTrack(stream);
+}
+
 function waitForVideoTrack(stream, timeoutMs = 2500) {
   const existing = streamVideoTrack(stream);
   if (existing) {
@@ -496,6 +521,50 @@ function attachStreamToVideo(video, stream) {
       unbind();
     }
   };
+}
+
+/* ---- lib/remote-bridge.js ---- */
+/** Paint the reserved Document PiP document immediately so it is not a white about:blank. */
+function paintPipShell(pipWindow) {
+  const doc = pipWindow?.document;
+  if (!doc) {
+    return;
+  }
+  const html = doc.documentElement;
+  if (html) {
+    html.style.background = "#000";
+    html.style.height = "100%";
+  }
+  if (doc.body) {
+    doc.body.style.background = "#000";
+    doc.body.style.margin = "0";
+    doc.body.style.height = "100%";
+  }
+}
+
+/**
+ * Apply the iframe offer and create an answer.
+ * Must not wait for ontrack: Chrome often withholds the track until the
+ * answer is applied on the sender, so waiting first deadlocks and the
+ * empty white PiP window is then closed.
+ */
+async function createReceiverAnswer(connection, offer) {
+  await connection.setRemoteDescription(offer);
+  await connection.setLocalDescription(await connection.createAnswer());
+  const local = connection.localDescription;
+  if (!local) {
+    throw new Error("The top frame could not create a WebRTC answer");
+  }
+  return local.toJSON?.() ?? { type: local.type, sdp: local.sdp };
+}
+
+function shouldCloseOnIceFailure(previousState, nextState) {
+  return previousState === "connected" && nextState === "failed";
+}
+
+/** HLS/MSE players fire emptied on quality switches; only close if the element is gone. */
+function sourceWasRemoved(video) {
+  return Boolean(video) && video.isConnected === false;
 }
 
 /* ---- lib/remote-video.js ---- */
@@ -1163,7 +1232,12 @@ class PipPlayer {
     doc.head.replaceChildren();
     doc.body.replaceChildren();
     doc.documentElement.lang = document.documentElement.lang || "en";
+    doc.documentElement.style.background = "#000";
     doc.title = this.sourceVideo.title || document.title || "Picture-in-Picture";
+    const boot = doc.createElement("style");
+    boot.textContent =
+      "html,body{background:#000;height:100%;margin:0;overflow:hidden;width:100%}#pip-video{background:#000;height:100%;object-fit:contain;width:100%}";
+    doc.head.append(boot);
     const style = doc.createElement("link");
     style.rel = "stylesheet";
     style.href = chrome.runtime.getURL("pip/player.css");
@@ -1213,7 +1287,11 @@ class PipPlayer {
       this.applyVideoAspect();
       this.fitPipWindow({ mode: "desired" });
     });
-    this.listenSource(this.sourceVideo, "emptied", () => this.close({ pause: false, reason: "emptied" }));
+    this.listenSource(this.sourceVideo, "emptied", () => {
+      if (sourceWasRemoved(this.sourceVideo)) {
+        this.close({ pause: false, reason: "emptied" });
+      }
+    });
     const track = this.stream?.getVideoTracks?.()[0];
     if (track?.addEventListener) {
       const onTrackResize = () => this.fitPipWindow({ mode: "desired" });
@@ -1504,8 +1582,11 @@ class PipPlayer {
     if (!this.stream) {
       return;
     }
-    for (const track of this.stream.getTracks()) {
-      track.stop();
+    const bridged = this.sourceVideo?.stream === this.stream;
+    if (!bridged) {
+      for (const track of this.stream.getTracks?.() ?? []) {
+        track.stop();
+      }
     }
     this.stream = null;
   }
@@ -1797,7 +1878,7 @@ function hidePlaceholder() {
   document.getElementById(PLACEHOLDER_ID)?.remove();
 }
 
-function waitForIceGathering(connection) {
+function waitForIceGathering(connection, timeoutMs = 1500) {
   if (connection.iceGatheringState === "complete") {
     return Promise.resolve();
   }
@@ -1813,7 +1894,7 @@ function waitForIceGathering(connection) {
     const timer = window.setTimeout(() => {
       connection.removeEventListener("icegatheringstatechange", done);
       resolve();
-    }, 1500);
+    }, timeoutMs);
     connection.addEventListener("icegatheringstatechange", done);
   });
 }
@@ -1923,8 +2004,12 @@ async function openRemoteSource(video) {
       relayRemote(0, "state", sessionId, snapshotVideo(video, document.title));
     const stateTimer = window.setInterval(sendState, 250);
     remoteSource = { sessionId, video, stream, connection, controller, stateTimer };
+    let iceState = connection.connectionState;
     connection.addEventListener("connectionstatechange", () => {
-      if (connection.connectionState === "failed") {
+      const next = connection.connectionState;
+      const previous = iceState;
+      iceState = next;
+      if (shouldCloseOnIceFailure(previous, next)) {
         cleanupRemoteSource();
       }
     });
@@ -1944,7 +2029,7 @@ async function openRemoteSource(video) {
 }
 
 async function openRemoteReceiver(message) {
-  if (window !== window.top || !("documentPictureInPicture" in window)) {
+  if (window !== window.top || IS_DOCUMENT_PIP || !("documentPictureInPicture" in window)) {
     return { ok: false, reason: "Document PiP is unavailable in the top frame" };
   }
   if (remoteReceiver) {
@@ -1955,26 +2040,24 @@ async function openRemoteReceiver(message) {
 
   let pipWindow = null;
   let connection = null;
+  let next = null;
   try {
     pipWindow = await window.documentPictureInPicture.requestWindow(pipRequestOptions(message.state));
+    paintPipShell(pipWindow);
     connection = new RTCPeerConnection({ iceServers: [] });
     const stream = new MediaStream();
-    const trackReady = waitForVideoTrack(stream);
     connection.addEventListener("track", (event) => {
-      if (!stream.getTracks().includes(event.track)) {
-        stream.addTrack(event.track);
-      }
+      adoptIncomingTrack(stream, event);
     });
-    await connection.setRemoteDescription(message.offer);
-    await connection.setLocalDescription(await connection.createAnswer());
-    await waitForIceGathering(connection);
-    await trackReady;
+    /* Answer before waiting for ontrack — otherwise Chrome never delivers the track. */
+    const answer = await createReceiverAnswer(connection, message.offer);
 
     const proxy = new RemoteVideo(stream, message.state, (command) =>
       relayRemote(message.sourceFrameId, "control", message.sessionId, command)
     );
     let session = null;
-    const next = new PipPlayer({
+    let iceState = connection.connectionState;
+    next = new PipPlayer({
       sourceVideo: proxy,
       settings,
       openerWindow: window,
@@ -2002,15 +2085,31 @@ async function openRemoteReceiver(message) {
     player = next;
     activeVideo = proxy;
     connection.addEventListener("connectionstatechange", () => {
-      if (connection.connectionState === "failed" && remoteReceiver === session) {
+      const previous = iceState;
+      iceState = connection.connectionState;
+      if (shouldCloseOnIceFailure(previous, iceState) && remoteReceiver === session) {
         next.close({ pause: false, reason: "remote-failed" });
       }
     });
-    await next.open();
-    return { ok: true, answer: connection.localDescription.toJSON() };
+    next.open().catch((error) => {
+      if (remoteReceiver === session) {
+        connection.close();
+        if (pipWindow && !pipWindow.closed) {
+          pipWindow.close();
+        }
+        remoteReceiver = null;
+        player = null;
+        activeVideo = null;
+        relayRemote(message.sourceFrameId, "close", message.sessionId);
+      }
+      console.warn("[PiP addon] Document PiP failed to attach the remote stream.", error);
+    });
+    return { ok: true, answer: connection.localDescription?.toJSON?.() ?? answer };
   } catch (error) {
     connection?.close();
-    if (pipWindow && !pipWindow.closed) {
+    if (next?.stillOpen?.()) {
+      next.close({ pause: false, reason: "remote-open-failed" });
+    } else if (pipWindow && !pipWindow.closed) {
       pipWindow.close();
     }
     remoteReceiver = null;
@@ -2076,15 +2175,11 @@ async function toggleVideo(video) {
   }
   if (window !== window.top) {
     cleanupRemoteSource();
-    if (shouldUseNativeVideoPip(video)) {
-      console.warn("[PiP addon] Embed video cannot be cloned; using native PiP.");
-      return launchPlayer(video, { nativeOnly: true });
-    }
     try {
       return await openRemoteSource(video);
     } catch (error) {
       console.warn("[PiP addon] Cross-frame Document PiP failed; using native PiP.", error);
-      /* Fall through to native PiP when the media stream cannot be bridged. */
+      /* Last resort: embed players often kill native PiP immediately. */
       return launchPlayer(video, { nativeOnly: true });
     }
   }
@@ -2193,7 +2288,7 @@ chrome.storage.onChanged.addListener((changes, area) => {
 });
 
 chrome.runtime.onMessage.addListener((message, _sender, sendResponse) => {
-  if (message?.type === "PIP_REMOTE_OPEN" && window === window.top) {
+  if (message?.type === "PIP_REMOTE_OPEN" && window === window.top && !IS_DOCUMENT_PIP) {
     openRemoteReceiver(message).then(sendResponse);
     return true;
   }
