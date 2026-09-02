@@ -39,6 +39,37 @@ describe("PipPlayer.open", () => {
     }
   });
 
+  it("rebinds the PiP video when the captured stream gets a track later", () => {
+    const assigned = [];
+    const listeners = [];
+    const stream = {
+      getVideoTracks: () => [],
+      addEventListener: (type, handler) => listeners.push({ type, handler }),
+      removeEventListener: () => {},
+    };
+    const pipVideo = {
+      set srcObject(value) {
+        assigned.push(value);
+      },
+      get srcObject() {
+        return assigned.at(-1) ?? null;
+      },
+      muted: false,
+      play: async () => {},
+    };
+    const player = new PipPlayer({
+      sourceVideo: { captureStream: () => stream },
+      settings: {},
+      openerWindow: { setTimeout() {}, clearTimeout() {} },
+    });
+    player.stream = stream;
+    player.attachPipMedia(pipVideo);
+    assert.equal(assigned.length, 1);
+    listeners.find((item) => item.type === "addtrack").handler({ track: { kind: "video" } });
+    assert.equal(assigned.length, 2);
+    assert.equal(assigned[1], stream);
+  });
+
   it("grows a clamped Document PiP window to the video aspect", () => {
     const resized = [];
     const pipWindow = {

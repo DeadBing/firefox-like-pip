@@ -1,0 +1,36 @@
+<!DOCTYPE html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>Iframe player fixture</title>
+    <style>
+      body {
+        font: 16px/1.5 system-ui, sans-serif;
+        margin: 32px auto;
+        max-width: 880px;
+      }
+      .playeralloha {
+        background: #000;
+        max-width: 100%;
+      }
+      iframe {
+        border: 0;
+        display: block;
+        height: 360px;
+        width: 100%;
+      }
+    </style>
+  </head>
+  <body>
+    <h1>Iframe embed fixture</h1>
+    <p>
+      Same layout as Alloha-style sites: the <code>&lt;video&gt;</code> lives in a child frame.
+      Hover the player and use Picture-in-Picture. The clone used to stay black because the
+      WebRTC bridge assigned an empty stream; it should now show the teal “IFRAME PLAYER” card.
+    </p>
+    <div class="playeralloha video-responsive">
+      <iframe src="embed-player.html" allowfullscreen></iframe>
+    </div>
+  </body>
+</html>

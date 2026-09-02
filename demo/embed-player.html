@@ -1,0 +1,52 @@
+<!DOCTYPE html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <title>Embedded player fixture</title>
+    <style>
+      html,
+      body {
+        background: #111;
+        height: 100%;
+        margin: 0;
+      }
+      video {
+        background: #000;
+        display: block;
+        height: 100%;
+        width: 100%;
+      }
+    </style>
+  </head>
+  <body>
+    <video id="embed" autoplay muted playsinline></video>
+    <script>
+      const video = document.getElementById("embed");
+      const canvas = document.createElement("canvas");
+      canvas.width = 1280;
+      canvas.height = 720;
+      const ctx = canvas.getContext("2d");
+      const draw = () => {
+        ctx.fillStyle = "#0f766e";
+        ctx.fillRect(0, 0, 1280, 720);
+        ctx.strokeStyle = "#fff";
+        ctx.lineWidth = 10;
+        ctx.strokeRect(16, 16, 1248, 688);
+        ctx.fillStyle = "#fff";
+        ctx.font = "700 72px system-ui, sans-serif";
+        ctx.textAlign = "center";
+        ctx.textBaseline = "middle";
+        ctx.fillText("IFRAME PLAYER", 640, 360);
+        ctx.font = "700 40px system-ui, sans-serif";
+        ctx.fillText("TL", 80, 70);
+        ctx.fillText("TR", 1200, 70);
+        ctx.fillText("BL", 80, 650);
+        ctx.fillText("BR", 1200, 650);
+        requestAnimationFrame(draw);
+      };
+      requestAnimationFrame(draw);
+      video.srcObject = canvas.captureStream(30);
+      video.play().catch(() => {});
+    </script>
+  </body>
+</html>
