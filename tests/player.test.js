@@ -38,4 +38,34 @@ describe("PipPlayer.open", () => {
       }
     }
   });
+
+  it("grows a clamped Document PiP window to the video aspect", () => {
+    const resized = [];
+    const pipWindow = {
+      closed: false,
+      innerWidth: 240,
+      innerHeight: 270,
+      outerWidth: 240,
+      outerHeight: 306,
+      resizeTo(width, height) {
+        resized.push({ width, height });
+        this.outerWidth = width;
+        this.outerHeight = height;
+        this.innerWidth = width;
+        this.innerHeight = height - 36;
+      },
+      setTimeout(fn) {
+        fn();
+      },
+    };
+    const player = new PipPlayer({
+      sourceVideo: { videoWidth: 1080, videoHeight: 1920 },
+      settings: {},
+      openerWindow: { setTimeout() {}, clearTimeout() {} },
+    });
+    player.pipWindow = pipWindow;
+    player.stream = { getVideoTracks: () => [] };
+    assert.equal(player.fitPipWindow({ mode: "grow" }), true);
+    assert.deepEqual(resized, [{ width: 240, height: 463 }]);
+  });
 });

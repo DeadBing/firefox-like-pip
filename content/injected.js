@@ -267,17 +267,123 @@ function collectVideos(root = document, into = []) {
   return into;
 }
 
-function pipWindowSize(video, maxWidth = 480, maxHeight = 270) {
-  const vw = video.videoWidth || video.clientWidth || 640;
-  const vh = video.videoHeight || video.clientHeight || 360;
-  const ratio = vw / vh || 16 / 9;
-  let width = Math.min(maxWidth, Math.max(240, vw));
-  let height = Math.round(width / ratio);
+/** Longest edge of a newly opened Document PiP window, in CSS pixels. */
+const PIP_MAX_EDGE = 480;
+
+function videoContentSize(video, stream) {
+  const track = stream?.getVideoTracks?.()?.[0];
+  const settings = typeof track?.getSettings === "function" ? track.getSettings() : {};
+  const width =
+    Number(settings.width) ||
+    Number(video?.videoWidth) ||
+    Number(video?.width) ||
+    Number(video?.clientWidth) ||
+    640;
+  const height =
+    Number(settings.height) ||
+    Number(video?.videoHeight) ||
+    Number(video?.height) ||
+    Number(video?.clientHeight) ||
+    360;
+  return {
+    width,
+    height,
+    ratio: width / height || 16 / 9,
+  };
+}
+
+function fitSizeToBox(ratio, maxWidth, maxHeight) {
+  const safeRatio = ratio > 0 && Number.isFinite(ratio) ? ratio : 16 / 9;
+  let width = maxWidth;
+  let height = width / safeRatio;
   if (height > maxHeight) {
     height = maxHeight;
-    width = Math.round(height * ratio);
+    width = height * safeRatio;
   }
-  return { width, height };
+  return {
+    width: Math.max(1, Math.round(width)),
+    height: Math.max(1, Math.round(height)),
+  };
+}
+
+/**
+ * Size the Document PiP viewport to the video's real aspect ratio.
+ * The old 480×270 box forced portrait/ultrawide clips into a 16:9 hole,
+ * which Chrome then clamped — so the player either letterboxed or clipped.
+ */
+function pipWindowSize(video, maxWidth = PIP_MAX_EDGE, maxHeight = PIP_MAX_EDGE, stream) {
+  const { ratio } = videoContentSize(video, stream);
+  return fitSizeToBox(ratio, maxWidth, maxHeight);
+}
+
+function pipRequestOptions(video, stream) {
+  const size = pipWindowSize(video, PIP_MAX_EDGE, PIP_MAX_EDGE, stream);
+  return {
+    width: size.width,
+    height: size.height,
+    preferInitialWindowPlacement: true,
+  };
+}
+
+function windowChromeSize(win) {
+  if (!win) {
+    return { width: 0, height: 0 };
+  }
+  return {
+    width: Math.max(0, (Number(win.outerWidth) || 0) - (Number(win.innerWidth) || 0)),
+    height: Math.max(0, (Number(win.outerHeight) || 0) - (Number(win.innerHeight) || 0)),
+  };
+}
+
+function outerSizeForInner(win, innerWidth, innerHeight) {
+  const chrome = windowChromeSize(win);
+  return {
+    width: Math.round(innerWidth + chrome.width),
+    height: Math.round(innerHeight + chrome.height),
+  };
+}
+
+function aspectMismatch(width, height, ratio, epsilon = 0.02) {
+  if (!width || !height || !ratio) {
+    return true;
+  }
+  return Math.abs(width / height - ratio) > epsilon;
+}
+
+/** Grow the short side of a viewport so it matches `ratio` without shrinking the video. */
+function growInnerToAspect(innerWidth, innerHeight, ratio) {
+  const safeRatio = ratio > 0 && Number.isFinite(ratio) ? ratio : 16 / 9;
+  const current = innerWidth / innerHeight || safeRatio;
+  if (current > safeRatio) {
+    return {
+      width: Math.round(innerWidth),
+      height: Math.round(innerWidth / safeRatio),
+    };
+  }
+  return {
+    width: Math.round(innerHeight * safeRatio),
+    height: Math.round(innerHeight),
+  };
+}
+
+/** Keep the edge the user dragged; adjust the other so the ratio stays locked. */
+function snapInnerToAspect(innerWidth, innerHeight, ratio, previous) {
+  const safeRatio = ratio > 0 && Number.isFinite(ratio) ? ratio : 16 / 9;
+  if (!previous) {
+    return growInnerToAspect(innerWidth, innerHeight, safeRatio);
+  }
+  const deltaWidth = Math.abs(innerWidth - previous.width);
+  const deltaHeight = Math.abs(innerHeight - previous.height);
+  if (deltaWidth >= deltaHeight) {
+    return {
+      width: Math.round(innerWidth),
+      height: Math.round(innerWidth / safeRatio),
+    };
+  }
+  return {
+    width: Math.round(innerHeight * safeRatio),
+    height: Math.round(innerHeight),
+  };
 }
 
 /* ---- lib/remote-video.js ---- */
@@ -618,7 +724,9 @@ function button(id, tooltip, icon, extraClass = "") {
 function playerMarkup(strings) {
   return `
     <div class="player-holder">
-      <video id="pip-video" playsinline></video>
+      <div class="video-stage">
+        <video id="pip-video" playsinline disablepictureinpicture></video>
+      </div>
       <div id="captions"></div>
       <div id="controls" showing>
         ${button("unpip", strings.unpip, ICONS.unpip)}
@@ -719,8 +827,95 @@ class PipPlayer {
     this.strings = localize();
     this.captionTimer = 0;
     this.hideTimer = 0;
+    this.resizeSnapTimer = 0;
+    this.fittingWindow = false;
+    this.lastInnerSize = null;
     this.bound = [];
     this.sourceBound = [];
+  }
+
+  contentSize() {
+    return videoContentSize(this.sourceVideo, this.stream);
+  }
+
+  desiredInnerSize() {
+    return pipWindowSize(this.sourceVideo, undefined, undefined, this.stream);
+  }
+
+  applyVideoAspect() {
+    const video = this.pipWindow && !this.pipWindow.closed ? this.qs("pip-video") : null;
+    if (!video) {
+      return;
+    }
+    const { width, height, ratio } = this.contentSize();
+    if (!ratio) {
+      return;
+    }
+    video.style.aspectRatio = `${width} / ${height}`;
+    this.pipWindow.document.documentElement.style.setProperty("--pip-aspect", String(ratio));
+  }
+
+  fitPipWindow({ mode = "desired" } = {}) {
+    if (!this.pipWindow || this.pipWindow.closed || this.maximized || this.usingNative) {
+      return false;
+    }
+    const { ratio } = this.contentSize();
+    const win = this.pipWindow;
+    const innerWidth = Number(win.innerWidth) || 0;
+    const innerHeight = Number(win.innerHeight) || 0;
+    if (!innerWidth || !innerHeight) {
+      return false;
+    }
+
+    let next;
+    if (mode === "snap") {
+      next = snapInnerToAspect(innerWidth, innerHeight, ratio, this.lastInnerSize);
+    } else if (mode === "grow") {
+      next = growInnerToAspect(innerWidth, innerHeight, ratio);
+    } else {
+      next = this.desiredInnerSize();
+    }
+
+    if (!aspectMismatch(innerWidth, innerHeight, ratio)) {
+      this.lastInnerSize = { width: innerWidth, height: innerHeight };
+      return false;
+    }
+
+    const outer = outerSizeForInner(win, next.width, next.height);
+    this.fittingWindow = true;
+    try {
+      win.resizeTo(outer.width, outer.height);
+      this.lastInnerSize = {
+        width: Number(win.innerWidth) || next.width,
+        height: Number(win.innerHeight) || next.height,
+      };
+      return true;
+    } catch {
+      this.lastInnerSize = { width: innerWidth, height: innerHeight };
+      return false;
+    } finally {
+      const clear = () => {
+        this.fittingWindow = false;
+      };
+      if (typeof win.setTimeout === "function") {
+        win.setTimeout(clear, 0);
+      } else {
+        clear();
+      }
+    }
+  }
+
+  scheduleAspectSnap() {
+    if (this.fittingWindow || this.maximized || !this.pipWindow) {
+      return;
+    }
+    if (this.resizeSnapTimer) {
+      this.openerWindow.clearTimeout(this.resizeSnapTimer);
+    }
+    this.resizeSnapTimer = this.openerWindow.setTimeout(() => {
+      this.resizeSnapTimer = 0;
+      this.fitPipWindow({ mode: "snap" });
+    }, 120);
   }
 
   stillOpen() {
@@ -752,13 +947,10 @@ class PipPlayer {
     if (existing && !existing.closed) {
       this.pipWindow = existing;
     } else {
-      const size = pipWindowSize(this.sourceVideo);
       try {
-        this.pipWindow = await window.documentPictureInPicture.requestWindow({
-          width: size.width,
-          height: size.height,
-          preferInitialWindowPlacement: false,
-        });
+        this.pipWindow = await window.documentPictureInPicture.requestWindow(
+          pipRequestOptions(this.sourceVideo, this.stream)
+        );
       } catch {
         if (!this.stillOpen()) {
           return this.abandonOpen();
@@ -795,7 +987,9 @@ class PipPlayer {
     this.bindSource();
     this.bindControls();
     this.sync();
+    this.applyVideoAspect();
     this.revealControls(true);
+    this.fitPipWindow({ mode: "grow" });
     return { mode: "document", window: this.pipWindow };
   }
 
@@ -849,6 +1043,8 @@ class PipPlayer {
     }
     this.bindSource();
     this.sync();
+    this.applyVideoAspect();
+    this.fitPipWindow({ mode: "desired" });
     return { ok: true, mode: "document" };
   }
 
@@ -889,20 +1085,26 @@ class PipPlayer {
   }
 
   bindSource() {
-    const events = [
-      "play",
-      "pause",
-      "ended",
-      "timeupdate",
-      "volumechange",
-      "ratechange",
-      "loadedmetadata",
-      "durationchange",
-    ];
+    const events = ["play", "pause", "ended", "timeupdate", "volumechange", "ratechange", "durationchange"];
     for (const type of events) {
       this.listenSource(this.sourceVideo, type, () => this.sync());
     }
+    this.listenSource(this.sourceVideo, "loadedmetadata", () => {
+      this.sync();
+      this.applyVideoAspect();
+      this.fitPipWindow({ mode: "desired" });
+    });
+    this.listenSource(this.sourceVideo, "resize", () => {
+      this.applyVideoAspect();
+      this.fitPipWindow({ mode: "desired" });
+    });
     this.listenSource(this.sourceVideo, "emptied", () => this.close({ pause: false, reason: "emptied" }));
+    const track = this.stream?.getVideoTracks?.()[0];
+    if (track?.addEventListener) {
+      const onTrackResize = () => this.fitPipWindow({ mode: "desired" });
+      track.addEventListener("resize", onTrackResize);
+      this.sourceBound.push(() => track.removeEventListener("resize", onTrackResize));
+    }
   }
 
   bindControls() {
@@ -962,6 +1164,7 @@ class PipPlayer {
     this.listen(this.pipWindow, "pagehide", () =>
       this.teardown({ pause: this._pendingPause ?? this.settings.pauseOnClose })
     );
+    this.listen(this.pipWindow, "resize", () => this.scheduleAspectSnap());
     this.listen(controls, "mousemove", () => this.revealControls(false));
     this.listen(controls, "mouseenter", () => this.showControls());
     this.listen(controls, "mouseleave", () => {
@@ -1216,6 +1419,10 @@ class PipPlayer {
     }
     if (this.hideTimer) {
       this.openerWindow.clearTimeout(this.hideTimer);
+    }
+    if (this.resizeSnapTimer) {
+      this.openerWindow.clearTimeout(this.resizeSnapTimer);
+      this.resizeSnapTimer = 0;
     }
     this.stopStream();
     if (pause) {
@@ -1626,15 +1833,10 @@ async function openRemoteReceiver(message) {
     player.close({ pause: false, reason: "replace-remote" });
   }
 
-  const size = pipWindowSize(message.state);
   let pipWindow = null;
   let connection = null;
   try {
-    pipWindow = await window.documentPictureInPicture.requestWindow({
-      width: size.width,
-      height: size.height,
-      preferInitialWindowPlacement: false,
-    });
+    pipWindow = await window.documentPictureInPicture.requestWindow(pipRequestOptions(message.state));
     connection = new RTCPeerConnection({ iceServers: [] });
     const stream = new MediaStream();
     connection.addEventListener("track", (event) => {
