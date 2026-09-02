@@ -2,7 +2,11 @@ import { describe, it } from "node:test";
 import assert from "node:assert/strict";
 import { adoptIncomingTrack } from "../lib/media-stream.js";
 import {
+  applyIceCandidate,
+  createIceBucket,
   createReceiverAnswer,
+  flushIceBucket,
+  iceCandidatePayload,
   paintPipShell,
   shouldCloseOnIceFailure,
   sourceWasRemoved,
@@ -106,6 +110,44 @@ describe("sourceWasRemoved", () => {
     assert.equal(sourceWasRemoved({ isConnected: true }), false);
     assert.equal(sourceWasRemoved({}), false);
     assert.equal(sourceWasRemoved({ isConnected: false }), true);
+  });
+});
+
+describe("ICE trickle helpers", () => {
+  it("queues candidates until the peer connection exists", async () => {
+    const bucket = createIceBucket();
+    bucket.queue("s1", { candidate: "a" });
+    bucket.queue("s1", null);
+    const applied = [];
+    const connection = {
+      addIceCandidate: async (candidate) => {
+        applied.push(candidate);
+      },
+    };
+    await flushIceBucket(bucket, "s1", connection);
+    assert.deepEqual(applied, [{ candidate: "a" }, null]);
+    assert.deepEqual(bucket.take("s1"), []);
+  });
+
+  it("serializes an RTCIceCandidate", () => {
+    assert.deepEqual(iceCandidatePayload(null), { candidate: null });
+    assert.deepEqual(
+      iceCandidatePayload({
+        toJSON: () => ({ candidate: "typ host", sdpMid: "0", sdpMLineIndex: 0 }),
+      }),
+      { candidate: { candidate: "typ host", sdpMid: "0", sdpMLineIndex: 0 } }
+    );
+  });
+
+  it("swallows addIceCandidate failures", async () => {
+    await applyIceCandidate(
+      {
+        addIceCandidate: async () => {
+          throw new Error("bad");
+        },
+      },
+      { candidate: "x" }
+    );
   });
 });
 

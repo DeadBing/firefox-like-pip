@@ -497,6 +497,15 @@ function attachStreamToVideo(video, stream) {
   if (!video || !stream) {
     return () => {};
   }
+  const unmutes = [];
+  const watchUnmute = (track) => {
+    if (!track?.addEventListener) {
+      return;
+    }
+    const onUnmute = () => bind();
+    track.addEventListener("unmute", onUnmute);
+    unmutes.push(() => track.removeEventListener("unmute", onUnmute));
+  };
   const bind = () => {
     video.srcObject = stream;
     video.muted = true;
@@ -505,15 +514,13 @@ function attachStreamToVideo(video, stream) {
   bind();
   const onAddTrack = (event) => {
     if (event.track?.kind === "video") {
+      watchUnmute(event.track);
       bind();
     }
   };
   stream.addEventListener?.("addtrack", onAddTrack);
-  const unmutes = [];
   for (const track of stream.getVideoTracks?.() ?? []) {
-    const onUnmute = () => bind();
-    track.addEventListener?.("unmute", onUnmute);
-    unmutes.push(() => track.removeEventListener?.("unmute", onUnmute));
+    watchUnmute(track);
   }
   return () => {
     stream.removeEventListener?.("addtrack", onAddTrack);
@@ -523,7 +530,121 @@ function attachStreamToVideo(video, stream) {
   };
 }
 
+/** captureStream when possible; canvas pump when the element is readable but the track is missing. */
+function captureVideoStream(video) {
+  try {
+    const stream = video.captureStream();
+    if (streamVideoTrack(stream)) {
+      return { stream, mode: "element" };
+    }
+    for (const track of stream.getTracks?.() ?? []) {
+      track.stop();
+    }
+  } catch {
+    /* Fall through to a canvas clone when the element is not tainted. */
+  }
+  if (videoFrameCaptureBlocked(video) || videoPaintIsTainted(video)) {
+    const error = new Error("The embed video cannot be cloned");
+    error.code = "TAINTED";
+    throw error;
+  }
+  return { stream: startCanvasCapture(video), mode: "canvas" };
+}
+
+function startCanvasCapture(video) {
+  const doc = globalThis.document;
+  const canvas = doc.createElement("canvas");
+  const context = canvas.getContext("2d");
+  if (!context) {
+    throw new Error("The embed video cannot be cloned");
+  }
+  let running = true;
+  const draw = () => {
+    if (!running) {
+      return;
+    }
+    const width = Number(video.videoWidth) || Number(video.clientWidth) || 640;
+    const height = Number(video.videoHeight) || Number(video.clientHeight) || 360;
+    if (width && height && (canvas.width !== width || canvas.height !== height)) {
+      canvas.width = width;
+      canvas.height = height;
+    }
+    try {
+      if (video.readyState >= 2 && canvas.width && canvas.height) {
+        context.drawImage(video, 0, 0, canvas.width, canvas.height);
+      }
+    } catch {
+      running = false;
+      return;
+    }
+    globalThis.requestAnimationFrame(draw);
+  };
+  globalThis.requestAnimationFrame(draw);
+  const stream = canvas.captureStream(30);
+  const stop = stream.getTracks?.()[0];
+  if (stop) {
+    const original = stop.stop.bind(stop);
+    stop.stop = () => {
+      running = false;
+      original();
+    };
+  }
+  return stream;
+}
+
 /* ---- lib/remote-bridge.js ---- */
+/** Same-tab iframe ↔ top-frame. STUN helps when host/mDNS candidates do not pair. */
+const RTC_CONFIG = {
+  iceServers: [{ urls: "stun:stun.l.google.com:19302" }],
+};
+
+function iceCandidatePayload(candidate) {
+  if (!candidate) {
+    return { candidate: null };
+  }
+  return {
+    candidate:
+      candidate.toJSON?.() ?? {
+        candidate: candidate.candidate,
+        sdpMid: candidate.sdpMid,
+        sdpMLineIndex: candidate.sdpMLineIndex,
+      },
+  };
+}
+
+function createIceBucket() {
+  const pending = new Map();
+  return {
+    queue(sessionId, candidate) {
+      const list = pending.get(sessionId) ?? [];
+      list.push(candidate);
+      pending.set(sessionId, list);
+    },
+    take(sessionId) {
+      const list = pending.get(sessionId) ?? [];
+      pending.delete(sessionId);
+      return list;
+    },
+  };
+}
+
+async function applyIceCandidate(connection, candidate) {
+  if (!connection?.addIceCandidate) {
+    return;
+  }
+  try {
+    await connection.addIceCandidate(candidate ?? null);
+  } catch {
+    /* Duplicate or stale candidate */
+  }
+}
+
+async function flushIceBucket(bucket, sessionId, connection) {
+  for (const candidate of bucket.take(sessionId)) {
+    await applyIceCandidate(connection, candidate);
+  }
+}
+
 /** Paint the reserved Document PiP document immediately so it is not a white about:blank. */
 function paintPipShell(pipWindow) {
   const doc = pipWindow?.document;
@@ -1033,7 +1154,9 @@ class PipPlayer {
     if (!ratio) {
       return;
     }
-    video.style.aspectRatio = `${width} / ${height}`;
+    if (video.style) {
+      video.style.aspectRatio = `${width} / ${height}`;
+    }
     this.pipWindow.document.documentElement.style.setProperty("--pip-aspect", String(ratio));
   }
 
@@ -1252,6 +1375,24 @@ class PipPlayer {
   attachPipMedia(pipVideo) {
     this.unbindPipMedia?.();
     this.unbindPipMedia = attachStreamToVideo(pipVideo, this.stream);
+  }
+
+  replaceStream(stream) {
+    if (!stream || this._tornDown) {
+      return;
+    }
+    this.stream = stream;
+    if (this.sourceVideo && "stream" in this.sourceVideo) {
+      this.sourceVideo.stream = stream;
+    }
+    const pipVideo =
+      this.pipWindow && !this.pipWindow.closed ? this.qs("pip-video") : null;
+    if (!pipVideo) {
+      return;
+    }
+    this.attachPipMedia(pipVideo);
+    this.applyVideoAspect();
+    this.fitPipWindow({ mode: "desired" });
   }
 
   qs(id) {
@@ -1665,6 +1806,7 @@ let videoSeq = 0;
 let mutationTimer = 0;
 let remoteSource = null;
 let remoteReceiver = null;
+const iceBucket = createIceBucket();
 
 function viewport() {
   return { width: window.innerWidth, height: window.innerHeight };
@@ -1911,6 +2053,20 @@ function relayRemote(targetFrameId, event, sessionId, payload) {
     .catch(() => null);
 }
 
+function listenForIce(connection, targetFrameId, sessionId) {
+  connection.addEventListener("icecandidate", (event) => {
+    relayRemote(targetFrameId, "ice", sessionId, iceCandidatePayload(event.candidate));
+  });
+}
+
+function handleRemoteIce(sessionId, connection, candidate) {
+  if (connection) {
+    applyIceCandidate(connection, candidate);
+    return;
+  }
+  iceBucket.queue(sessionId, candidate);
+}
+
 function cleanupRemoteSource({ pause = false, notify = true } = {}) {
   const session = remoteSource;
   if (!session) {
@@ -1963,10 +2119,8 @@ function applyRemoteCommand(video, command) {
 }
 
 async function openRemoteSource(video) {
-  if (video.paused) {
-    await video.play().catch(() => {});
-  }
-  const stream = video.captureStream();
+  video.play()?.catch(() => {});
+  const { stream } = captureVideoStream(video);
   const tracks = stream.getVideoTracks();
   if (!tracks.length) {
     for (const track of stream.getTracks()) {
@@ -1976,7 +2130,15 @@ async function openRemoteSource(video) {
   }
 
   const sessionId = crypto.randomUUID();
-  const connection = new RTCPeerConnection({ iceServers: [] });
+  const connection = new RTCPeerConnection(RTC_CONFIG);
+  listenForIce(connection, 0, sessionId);
+  const controller = {
+    stillOpen: () => remoteSource?.sessionId === sessionId,
+    close: ({ pause = false } = {}) => cleanupRemoteSource({ pause }),
+  };
+  remoteSource = { sessionId, video, stream, connection, controller, stateTimer: 0 };
+  await flushIceBucket(iceBucket, sessionId, connection);
+
   for (const track of tracks) {
     const sender = connection.addTrack(track, stream);
     await preserveVideoQuality(track, sender).catch(() => {});
@@ -1995,15 +2157,11 @@ async function openRemoteSource(video) {
       throw new Error(response?.reason || "The top frame could not open Document PiP");
     }
     await connection.setRemoteDescription(response.answer);
+    await flushIceBucket(iceBucket, sessionId, connection);
 
-    const controller = {
-      stillOpen: () => remoteSource?.sessionId === sessionId,
-      close: ({ pause = false } = {}) => cleanupRemoteSource({ pause }),
-    };
     const sendState = () =>
       relayRemote(0, "state", sessionId, snapshotVideo(video, document.title));
-    const stateTimer = window.setInterval(sendState, 250);
-    remoteSource = { sessionId, video, stream, connection, controller, stateTimer };
+    remoteSource.stateTimer = window.setInterval(sendState, 250);
     let iceState = connection.connectionState;
     connection.addEventListener("connectionstatechange", () => {
       const next = connection.connectionState;
@@ -2023,6 +2181,9 @@ async function openRemoteSource(video) {
     connection.close();
     for (const track of stream.getTracks()) {
       track.stop();
+    }
+    if (remoteSource?.sessionId === sessionId) {
+      remoteSource = null;
     }
     throw error;
   }
@@ -2044,14 +2205,9 @@ async function openRemoteReceiver(message) {
   try {
     pipWindow = await window.documentPictureInPicture.requestWindow(pipRequestOptions(message.state));
     paintPipShell(pipWindow);
-    connection = new RTCPeerConnection({ iceServers: [] });
+    connection = new RTCPeerConnection(RTC_CONFIG);
+    listenForIce(connection, message.sourceFrameId, message.sessionId);
     const stream = new MediaStream();
-    connection.addEventListener("track", (event) => {
-      adoptIncomingTrack(stream, event);
-    });
-    /* Answer before waiting for ontrack — otherwise Chrome never delivers the track. */
-    const answer = await createReceiverAnswer(connection, message.offer);
-
     const proxy = new RemoteVideo(stream, message.state, (command) =>
       relayRemote(message.sourceFrameId, "control", message.sessionId, command)
     );
@@ -2074,6 +2230,18 @@ async function openRemoteReceiver(message) {
         }
       },
     });
+    connection.addEventListener("track", (event) => {
+      const incoming = event.streams?.[0];
+      if (incoming) {
+        proxy.stream = incoming;
+        next.replaceStream(incoming);
+        return;
+      }
+      adoptIncomingTrack(stream, event);
+      next.replaceStream(stream);
+    });
+    /* Answer before waiting for ontrack — otherwise Chrome never delivers the track. */
+    await createReceiverAnswer(connection, message.offer);
     session = {
       sessionId: message.sessionId,
       sourceFrameId: message.sourceFrameId,
@@ -2084,6 +2252,7 @@ async function openRemoteReceiver(message) {
     remoteReceiver = session;
     player = next;
     activeVideo = proxy;
+    await flushIceBucket(iceBucket, message.sessionId, connection);
     connection.addEventListener("connectionstatechange", () => {
       const previous = iceState;
       iceState = connection.connectionState;
@@ -2091,20 +2260,11 @@ async function openRemoteReceiver(message) {
         next.close({ pause: false, reason: "remote-failed" });
       }
     });
-    next.open().catch((error) => {
-      if (remoteReceiver === session) {
-        connection.close();
-        if (pipWindow && !pipWindow.closed) {
-          pipWindow.close();
-        }
-        remoteReceiver = null;
-        player = null;
-        activeVideo = null;
-        relayRemote(message.sourceFrameId, "close", message.sessionId);
-      }
-      console.warn("[PiP addon] Document PiP failed to attach the remote stream.", error);
-    });
-    return { ok: true, answer: connection.localDescription?.toJSON?.() ?? answer };
+    const opening = next.open();
+    /* Include host/STUN candidates in the answer; still do not wait for ontrack. */
+    await waitForIceGathering(connection, 1200);
+    await opening;
+    return { ok: true, answer: connection.localDescription.toJSON() };
   } catch (error) {
     connection?.close();
     if (next?.stillOpen?.()) {
@@ -2175,11 +2335,13 @@ async function toggleVideo(video) {
   }
   if (window !== window.top) {
     cleanupRemoteSource();
+    if (shouldUseNativeVideoPip(video)) {
+      return launchPlayer(video, { nativeOnly: true });
+    }
     try {
       return await openRemoteSource(video);
     } catch (error) {
       console.warn("[PiP addon] Cross-frame Document PiP failed; using native PiP.", error);
-      /* Last resort: embed players often kill native PiP immediately. */
       return launchPlayer(video, { nativeOnly: true });
     }
   }
@@ -2304,6 +2466,12 @@ chrome.runtime.onMessage.addListener((message, _sender, sendResponse) => {
         notify: false,
         pause: Boolean(message.payload?.pause),
       });
+    } else if (message.event === "ice") {
+      const connection =
+        (remoteReceiver?.sessionId === message.sessionId && remoteReceiver.connection) ||
+        (remoteSource?.sessionId === message.sessionId && remoteSource.connection) ||
+        null;
+      handleRemoteIce(message.sessionId, connection, message.payload?.candidate);
     }
     sendResponse({ ok: true });
     return;

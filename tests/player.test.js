@@ -91,6 +91,36 @@ describe("PipPlayer.open", () => {
     assert.equal(player.stillOpen(), false);
   });
 
+  it("rebinds the PiP video when the remote stream is replaced", () => {
+    const assigned = [];
+    const pipVideo = {
+      set srcObject(value) {
+        assigned.push(value);
+      },
+      get srcObject() {
+        return assigned.at(-1) ?? null;
+      },
+      muted: false,
+      play: async () => {},
+    };
+    const first = { getVideoTracks: () => [], addEventListener() {}, removeEventListener() {} };
+    const second = { getVideoTracks: () => [], addEventListener() {}, removeEventListener() {} };
+    const player = new PipPlayer({
+      sourceVideo: { stream: first, captureStream: () => first },
+      settings: {},
+      openerWindow: { setTimeout() {}, clearTimeout() {} },
+    });
+    player.pipWindow = {
+      closed: false,
+      document: { getElementById: () => pipVideo, documentElement: { style: { setProperty() {} } } },
+    };
+    player.stream = first;
+    player.replaceStream(second);
+    assert.equal(player.stream, second);
+    assert.equal(player.sourceVideo.stream, second);
+    assert.equal(assigned.at(-1), second);
+  });
+
   it("does not stop a bridged remote MediaStream", () => {
     const stopped = [];
     const stream = {
