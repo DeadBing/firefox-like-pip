@@ -438,6 +438,23 @@ function streamVideoTrack(stream) {
   return stream?.getVideoTracks?.()?.find((track) => track.readyState !== "ended") ?? null;
 }
 
+function isElementVideo(video) {
+  return typeof video?.tagName === "string" && video.tagName.toUpperCase() === "VIDEO";
+}
+
+/** True when captureStream / the on-page box is smaller than the decoded frames. */
+function capturedSizeLooksDownscaled(video, track) {
+  const decodedW = Number(video?.videoWidth) || 0;
+  const decodedH = Number(video?.videoHeight) || 0;
+  if (decodedW < 2 || decodedH < 2) {
+    return false;
+  }
+  const settings = typeof track?.getSettings === "function" ? track.getSettings() : {};
+  const capW = Number(settings.width) || Number(video?.clientWidth) || 0;
+  const capH = Number(settings.height) || Number(video?.clientHeight) || 0;
+  return (capW > 0 && capW < decodedW * 0.85) || (capH > 0 && capH < decodedH * 0.85);
+}
+
 /** Ask the captured track for the source's decoded size, not the on-page box. */
 async function applyTrackResolution(track, video) {
   if (!track) {
@@ -451,7 +468,7 @@ async function applyTrackResolution(track, video) {
       .applyConstraints({
         width: { ideal: width },
         height: { ideal: height },
-          frameRate: { ideal: 60 },
+        frameRate: { ideal: 60 },
       })
       .catch(() => {});
   }
@@ -550,10 +567,14 @@ function attachStreamToVideo(video, stream) {
   };
 }
 
-/** captureStream when possible; canvas pump when the element is readable but the track is missing. */
+/**
+ * captureStream() often matches the on-page box (a 360px iframe, a small
+ * YouTube player). Paint a full-resolution canvas clone when the decoded
+ * frames are larger and the element is not CORS-tainted.
+ */
 function captureVideoStream(video) {
+  let stream = null;
   try {
-    let stream;
     try {
       stream = video.captureStream(0);
     } catch (error) {
@@ -565,10 +586,23 @@ function captureVideoStream(video) {
     const track = streamVideoTrack(stream);
     if (track) {
       applyTrackResolution(track, video);
-      return { stream, mode: "element" };
-    }
-    for (const track of stream.getTracks?.() ?? []) {
-      track.stop();
+      const useCanvas =
+        isElementVideo(video) &&
+        capturedSizeLooksDownscaled(video, track) &&
+        !videoFrameCaptureBlocked(video) &&
+        !videoPaintIsTainted(video);
+      if (!useCanvas) {
+        return { stream, mode: "element" };
+      }
+      for (const item of stream.getTracks?.() ?? []) {
+        item.stop();
+      }
+      stream = null;
+    } else {
+      for (const item of stream.getTracks?.() ?? []) {
+        item.stop();
+      }
+      stream = null;
     }
   } catch {
     /* Fall through to a canvas clone when the element is not tainted. */
@@ -610,7 +644,12 @@ function startCanvasCapture(video) {
     globalThis.requestAnimationFrame(draw);
   };
   globalThis.requestAnimationFrame(draw);
-  const stream = canvas.captureStream(30);
+  let stream;
+  try {
+    stream = canvas.captureStream(0);
+  } catch {
+    stream = canvas.captureStream(60);
+  }
   const stop = stream.getTracks?.()[0];
   if (stop) {
     const original = stop.stop.bind(stop);
@@ -1364,15 +1403,7 @@ class PipPlayer {
       return this.openNative();
     }
     try {
-      try {
-        this.stream = this.sourceVideo.captureStream(0);
-      } catch (error) {
-        if (error?.name !== "TypeError") {
-          throw error;
-        }
-        this.stream = this.sourceVideo.captureStream();
-      }
-      await applyTrackResolution(this.stream?.getVideoTracks?.()?.[0], this.sourceVideo);
+      this.stream = captureVideoStream(this.sourceVideo).stream;
     } catch {
       return this.openNative();
     }
@@ -1465,7 +1496,7 @@ class PipPlayer {
       return { ok: true, mode: "video" };
     }
     const pipVideo = this.qs("pip-video");
-    this.stream = video.captureStream();
+    this.stream = captureVideoStream(video).stream;
     this.attachPipMedia(pipVideo);
     await pipVideo.play().catch(() => {});
     if (!this.stillOpen()) {

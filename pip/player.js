@@ -11,7 +11,7 @@ import {
   snapInnerToAspect,
   videoContentSize,
 } from "../lib/video-utils.js";
-import { applyTrackResolution, attachStreamToVideo } from "../lib/media-stream.js";
+import { attachStreamToVideo, captureVideoStream } from "../lib/media-stream.js";
 import { sourceWasRemoved } from "../lib/remote-bridge.js";
 
 const ICONS = {
@@ -269,15 +269,7 @@ export class PipPlayer {
       return this.openNative();
     }
     try {
-      try {
-        this.stream = this.sourceVideo.captureStream(0);
-      } catch (error) {
-        if (error?.name !== "TypeError") {
-          throw error;
-        }
-        this.stream = this.sourceVideo.captureStream();
-      }
-      await applyTrackResolution(this.stream?.getVideoTracks?.()?.[0], this.sourceVideo);
+      this.stream = captureVideoStream(this.sourceVideo).stream;
     } catch {
       return this.openNative();
     }
@@ -370,7 +362,7 @@ export class PipPlayer {
       return { ok: true, mode: "video" };
     }
     const pipVideo = this.qs("pip-video");
-    this.stream = video.captureStream();
+    this.stream = captureVideoStream(video).stream;
     this.attachPipMedia(pipVideo);
     await pipVideo.play().catch(() => {});
     if (!this.stillOpen()) {
