@@ -11,6 +11,7 @@ import {
   snapInnerToAspect,
   videoContentSize,
 } from "../lib/video-utils.js";
+import { attachStreamToVideo } from "../lib/media-stream.js";
 
 const ICONS = {
   close:
@@ -157,6 +158,7 @@ export class PipPlayer {
     this.lastInnerSize = null;
     this.bound = [];
     this.sourceBound = [];
+    this.unbindPipMedia = null;
   }
 
   contentSize() {
@@ -291,9 +293,7 @@ export class PipPlayer {
     this.installDocument(this.pipWindow);
     const pipVideo = this.pipWindow.document.getElementById("pip-video");
     try {
-      pipVideo.srcObject = this.stream;
-      pipVideo.muted = true;
-      pipVideo.play().catch(() => {});
+      this.attachPipMedia(pipVideo);
     } catch {
       if (this.pipWindow && !this.pipWindow.closed) {
         this.pipWindow.close();
@@ -360,8 +360,7 @@ export class PipPlayer {
     }
     const pipVideo = this.qs("pip-video");
     this.stream = video.captureStream();
-    pipVideo.srcObject = this.stream;
-    pipVideo.muted = true;
+    this.attachPipMedia(pipVideo);
     await pipVideo.play().catch(() => {});
     if (!this.stillOpen()) {
       return { ok: false };
@@ -388,6 +387,11 @@ export class PipPlayer {
       doc.body.classList.add("mac");
     }
     this.applyCaptionSize(this.settings.captionFontSize);
+  }
+
+  attachPipMedia(pipVideo) {
+    this.unbindPipMedia?.();
+    this.unbindPipMedia = attachStreamToVideo(pipVideo, this.stream);
   }
 
   qs(id) {
@@ -709,6 +713,8 @@ export class PipPlayer {
   }
 
   stopStream() {
+    this.unbindPipMedia?.();
+    this.unbindPipMedia = null;
     if (!this.stream) {
       return;
     }

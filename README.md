@@ -40,6 +40,7 @@ Chrome’s built-in video PiP only offers play/pause. This extension opens a [Do
 
 - Chromium allows **one** Document Picture-in-Picture window at a time. Firefox can keep several.
 - Encrypted / DRM videos (some Netflix streams, etc.) cannot be cloned with `captureStream()`. The extension falls back to Chrome’s native video PiP.
+- Iframe embeds (Alloha-style players, many “запасной плеер” hosts) clone the video through a same-tab WebRTC bridge. If the site’s file is cross-origin without CORS, `captureStream()` is a black frame and the extension uses native video PiP instead of a blank Document PiP window.
 - Document PiP windows cannot enter OS fullscreen; the fullscreen control maximizes the floating window instead.
 - Chrome always draws a title bar (site origin) on Document PiP windows. The player sizes the *viewport* to the video, so that bar sits outside the picture instead of covering it. Native video PiP can hide that chrome; Document PiP cannot.
 - Chrome may clamp a window to a minimum size, and `resizeTo` only works with a user gesture. Portrait and ultrawide clips request a matching rectangle. If Chrome still refuses the size, the video letterboxes rather than being cropped.

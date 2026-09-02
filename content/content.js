@@ -12,6 +12,7 @@ import {
   snapshotVideo,
 } from "../lib/remote-video.js";
 import { isToggleShortcut } from "../lib/keys.js";
+import { shouldUseNativeVideoPip, waitForVideoTrack } from "../lib/media-stream.js";
 import { PipPlayer } from "../pip/player.js";
 
 const TOGGLE_ID = "pip-addon-toggle";
@@ -346,6 +347,9 @@ function applyRemoteCommand(video, command) {
 }
 
 async function openRemoteSource(video) {
+  if (video.paused) {
+    await video.play().catch(() => {});
+  }
   const stream = video.captureStream();
   const tracks = stream.getVideoTracks();
   if (!tracks.length) {
@@ -420,6 +424,7 @@ async function openRemoteReceiver(message) {
     pipWindow = await window.documentPictureInPicture.requestWindow(pipRequestOptions(message.state));
     connection = new RTCPeerConnection({ iceServers: [] });
     const stream = new MediaStream();
+    const trackReady = waitForVideoTrack(stream);
     connection.addEventListener("track", (event) => {
       if (!stream.getTracks().includes(event.track)) {
         stream.addTrack(event.track);
@@ -428,6 +433,7 @@ async function openRemoteReceiver(message) {
     await connection.setRemoteDescription(message.offer);
     await connection.setLocalDescription(await connection.createAnswer());
     await waitForIceGathering(connection);
+    await trackReady;
 
     const proxy = new RemoteVideo(stream, message.state, (command) =>
       relayRemote(message.sourceFrameId, "control", message.sessionId, command)
@@ -483,6 +489,42 @@ function attachPlayer(nextPlayer, video) {
   showPlaceholder(video);
 }
 
+async function launchPlayer(video, { nativeOnly = false } = {}) {
+  const next = new PipPlayer({
+    sourceVideo: video,
+    settings,
+    openerWindow: window,
+    onClose: (closed) => {
+      if (player === next) {
+        player = null;
+        activeVideo = null;
+        autoOpened = false;
+        hidePlaceholder();
+      }
+      return closed;
+    },
+  });
+  player = next;
+  try {
+    const opened = nativeOnly ? await next.openNative() : await next.open();
+    if (opened?.mode === "aborted" || !next.stillOpen()) {
+      if (player === next) {
+        player = null;
+        activeVideo = null;
+      }
+      return { ok: false, reason: "aborted" };
+    }
+    attachPlayer(next, video);
+    return { ok: true, mode: opened?.mode };
+  } catch (error) {
+    if (player === next) {
+      player = null;
+      activeVideo = null;
+    }
+    return { ok: false, reason: String(error?.message || error) };
+  }
+}
+
 async function toggleVideo(video) {
   if (IS_DOCUMENT_PIP) {
     return { ok: false, reason: "pip-window" };
@@ -499,11 +541,16 @@ async function toggleVideo(video) {
   }
   if (window !== window.top) {
     cleanupRemoteSource();
+    if (shouldUseNativeVideoPip(video)) {
+      console.warn("[PiP addon] Embed video cannot be cloned; using native PiP.");
+      return launchPlayer(video, { nativeOnly: true });
+    }
     try {
       return await openRemoteSource(video);
     } catch (error) {
       console.warn("[PiP addon] Cross-frame Document PiP failed; using native PiP.", error);
       /* Fall through to native PiP when the media stream cannot be bridged. */
+      return launchPlayer(video, { nativeOnly: true });
     }
   }
   if (player && player.stillOpen()) {
@@ -519,39 +566,7 @@ async function toggleVideo(video) {
       return { ok: false, reason: String(error?.message || error) };
     }
   }
-  try {
-    const next = new PipPlayer({
-      sourceVideo: video,
-      settings,
-      openerWindow: window,
-      onClose: (closed) => {
-        if (player === next) {
-          player = null;
-          activeVideo = null;
-          autoOpened = false;
-          hidePlaceholder();
-        }
-        return closed;
-      },
-    });
-    player = next;
-    const opened = await next.open();
-    if (opened?.mode === "aborted" || !next.stillOpen()) {
-      if (player === next) {
-        player = null;
-        activeVideo = null;
-      }
-      return { ok: false, reason: "aborted" };
-    }
-    attachPlayer(next, video);
-    return { ok: true, mode: opened?.mode };
-  } catch (error) {
-    if (player && !player.stillOpen()) {
-      player = null;
-      activeVideo = null;
-    }
-    return { ok: false, reason: String(error?.message || error) };
-  }
+  return launchPlayer(video);
 }
 
 function toggleBest() {
