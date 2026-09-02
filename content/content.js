@@ -12,9 +12,14 @@ import {
   snapshotVideo,
 } from "../lib/remote-video.js";
 import { isToggleShortcut } from "../lib/keys.js";
-import { adoptIncomingTrack } from "../lib/media-stream.js";
+import { adoptIncomingTrack, captureVideoStream, shouldUseNativeVideoPip } from "../lib/media-stream.js";
 import {
+  RTC_CONFIG,
+  applyIceCandidate,
+  createIceBucket,
   createReceiverAnswer,
+  flushIceBucket,
+  iceCandidatePayload,
   paintPipShell,
   shouldCloseOnIceFailure,
 } from "../lib/remote-bridge.js";
@@ -54,6 +59,7 @@ let videoSeq = 0;
 let mutationTimer = 0;
 let remoteSource = null;
 let remoteReceiver = null;
+const iceBucket = createIceBucket();
 
 function viewport() {
   return { width: window.innerWidth, height: window.innerHeight };
@@ -300,6 +306,20 @@ function relayRemote(targetFrameId, event, sessionId, payload) {
     .catch(() => null);
 }
 
+function listenForIce(connection, targetFrameId, sessionId) {
+  connection.addEventListener("icecandidate", (event) => {
+    relayRemote(targetFrameId, "ice", sessionId, iceCandidatePayload(event.candidate));
+  });
+}
+
+function handleRemoteIce(sessionId, connection, candidate) {
+  if (connection) {
+    applyIceCandidate(connection, candidate);
+    return;
+  }
+  iceBucket.queue(sessionId, candidate);
+}
+
 function cleanupRemoteSource({ pause = false, notify = true } = {}) {
   const session = remoteSource;
   if (!session) {
@@ -352,10 +372,8 @@ function applyRemoteCommand(video, command) {
 }
 
 async function openRemoteSource(video) {
-  if (video.paused) {
-    await video.play().catch(() => {});
-  }
-  const stream = video.captureStream();
+  video.play()?.catch(() => {});
+  const { stream } = captureVideoStream(video);
   const tracks = stream.getVideoTracks();
   if (!tracks.length) {
     for (const track of stream.getTracks()) {
@@ -365,7 +383,15 @@ async function openRemoteSource(video) {
   }
 
   const sessionId = crypto.randomUUID();
-  const connection = new RTCPeerConnection({ iceServers: [] });
+  const connection = new RTCPeerConnection(RTC_CONFIG);
+  listenForIce(connection, 0, sessionId);
+  const controller = {
+    stillOpen: () => remoteSource?.sessionId === sessionId,
+    close: ({ pause = false } = {}) => cleanupRemoteSource({ pause }),
+  };
+  remoteSource = { sessionId, video, stream, connection, controller, stateTimer: 0 };
+  await flushIceBucket(iceBucket, sessionId, connection);
+
   for (const track of tracks) {
     const sender = connection.addTrack(track, stream);
     await preserveVideoQuality(track, sender).catch(() => {});
@@ -384,15 +410,11 @@ async function openRemoteSource(video) {
       throw new Error(response?.reason || "The top frame could not open Document PiP");
     }
     await connection.setRemoteDescription(response.answer);
+    await flushIceBucket(iceBucket, sessionId, connection);
 
-    const controller = {
-      stillOpen: () => remoteSource?.sessionId === sessionId,
-      close: ({ pause = false } = {}) => cleanupRemoteSource({ pause }),
-    };
     const sendState = () =>
       relayRemote(0, "state", sessionId, snapshotVideo(video, document.title));
-    const stateTimer = window.setInterval(sendState, 250);
-    remoteSource = { sessionId, video, stream, connection, controller, stateTimer };
+    remoteSource.stateTimer = window.setInterval(sendState, 250);
     let iceState = connection.connectionState;
     connection.addEventListener("connectionstatechange", () => {
       const next = connection.connectionState;
@@ -412,6 +434,9 @@ async function openRemoteSource(video) {
     connection.close();
     for (const track of stream.getTracks()) {
       track.stop();
+    }
+    if (remoteSource?.sessionId === sessionId) {
+      remoteSource = null;
     }
     throw error;
   }
@@ -433,14 +458,9 @@ async function openRemoteReceiver(message) {
   try {
     pipWindow = await window.documentPictureInPicture.requestWindow(pipRequestOptions(message.state));
     paintPipShell(pipWindow);
-    connection = new RTCPeerConnection({ iceServers: [] });
+    connection = new RTCPeerConnection(RTC_CONFIG);
+    listenForIce(connection, message.sourceFrameId, message.sessionId);
     const stream = new MediaStream();
-    connection.addEventListener("track", (event) => {
-      adoptIncomingTrack(stream, event);
-    });
-    /* Answer before waiting for ontrack — otherwise Chrome never delivers the track. */
-    const answer = await createReceiverAnswer(connection, message.offer);
-
     const proxy = new RemoteVideo(stream, message.state, (command) =>
       relayRemote(message.sourceFrameId, "control", message.sessionId, command)
     );
@@ -463,6 +483,18 @@ async function openRemoteReceiver(message) {
         }
       },
     });
+    connection.addEventListener("track", (event) => {
+      const incoming = event.streams?.[0];
+      if (incoming) {
+        proxy.stream = incoming;
+        next.replaceStream(incoming);
+        return;
+      }
+      adoptIncomingTrack(stream, event);
+      next.replaceStream(stream);
+    });
+    /* Answer before waiting for ontrack — otherwise Chrome never delivers the track. */
+    await createReceiverAnswer(connection, message.offer);
     session = {
       sessionId: message.sessionId,
       sourceFrameId: message.sourceFrameId,
@@ -473,6 +505,7 @@ async function openRemoteReceiver(message) {
     remoteReceiver = session;
     player = next;
     activeVideo = proxy;
+    await flushIceBucket(iceBucket, message.sessionId, connection);
     connection.addEventListener("connectionstatechange", () => {
       const previous = iceState;
       iceState = connection.connectionState;
@@ -480,20 +513,11 @@ async function openRemoteReceiver(message) {
         next.close({ pause: false, reason: "remote-failed" });
       }
     });
-    next.open().catch((error) => {
-      if (remoteReceiver === session) {
-        connection.close();
-        if (pipWindow && !pipWindow.closed) {
-          pipWindow.close();
-        }
-        remoteReceiver = null;
-        player = null;
-        activeVideo = null;
-        relayRemote(message.sourceFrameId, "close", message.sessionId);
-      }
-      console.warn("[PiP addon] Document PiP failed to attach the remote stream.", error);
-    });
-    return { ok: true, answer: connection.localDescription?.toJSON?.() ?? answer };
+    const opening = next.open();
+    /* Include host/STUN candidates in the answer; still do not wait for ontrack. */
+    await waitForIceGathering(connection, 1200);
+    await opening;
+    return { ok: true, answer: connection.localDescription.toJSON() };
   } catch (error) {
     connection?.close();
     if (next?.stillOpen?.()) {
@@ -564,11 +588,13 @@ async function toggleVideo(video) {
   }
   if (window !== window.top) {
     cleanupRemoteSource();
+    if (shouldUseNativeVideoPip(video)) {
+      return launchPlayer(video, { nativeOnly: true });
+    }
     try {
       return await openRemoteSource(video);
     } catch (error) {
       console.warn("[PiP addon] Cross-frame Document PiP failed; using native PiP.", error);
-      /* Last resort: embed players often kill native PiP immediately. */
       return launchPlayer(video, { nativeOnly: true });
     }
   }
@@ -693,6 +719,12 @@ chrome.runtime.onMessage.addListener((message, _sender, sendResponse) => {
         notify: false,
         pause: Boolean(message.payload?.pause),
       });
+    } else if (message.event === "ice") {
+      const connection =
+        (remoteReceiver?.sessionId === message.sessionId && remoteReceiver.connection) ||
+        (remoteSource?.sessionId === message.sessionId && remoteSource.connection) ||
+        null;
+      handleRemoteIce(message.sessionId, connection, message.payload?.candidate);
     }
     sendResponse({ ok: true });
     return;

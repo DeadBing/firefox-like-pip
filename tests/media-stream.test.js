@@ -2,6 +2,7 @@ import { describe, it } from "node:test";
 import assert from "node:assert/strict";
 import {
   attachStreamToVideo,
+  captureVideoStream,
   shouldUseNativeVideoPip,
   streamVideoTrack,
   videoFrameCaptureBlocked,
@@ -79,6 +80,42 @@ describe("waitForVideoTrack", () => {
     const pending = waitForVideoTrack(stream, 200);
     listeners.find((item) => item.type === "addtrack").handler({ track });
     assert.equal(await pending, track);
+  });
+});
+
+describe("captureVideoStream", () => {
+  it("uses the element capture when a video track exists", () => {
+    const stream = {
+      getVideoTracks: () => [{ readyState: "live", kind: "video" }],
+      getTracks: () => [],
+    };
+    assert.deepEqual(captureVideoStream({ captureStream: () => stream }), {
+      stream,
+      mode: "element",
+    });
+  });
+
+  it("throws TAINTED when capture is blocked and paint is tainted", () => {
+    const previous = globalThis.location;
+    Object.defineProperty(globalThis, "location", {
+      configurable: true,
+      value: { href: "https://site.example/", origin: "https://site.example" },
+    });
+    try {
+      assert.throws(
+        () =>
+          captureVideoStream({
+            currentSrc: "https://cdn.example/a.mp4",
+            crossOrigin: null,
+            captureStream() {
+              throw new Error("blocked");
+            },
+          }),
+        (error) => error.code === "TAINTED"
+      );
+    } finally {
+      Object.defineProperty(globalThis, "location", { configurable: true, value: previous });
+    }
   });
 });
 

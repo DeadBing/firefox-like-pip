@@ -179,7 +179,9 @@ export class PipPlayer {
     if (!ratio) {
       return;
     }
-    video.style.aspectRatio = `${width} / ${height}`;
+    if (video.style) {
+      video.style.aspectRatio = `${width} / ${height}`;
+    }
     this.pipWindow.document.documentElement.style.setProperty("--pip-aspect", String(ratio));
   }
 
@@ -398,6 +400,24 @@ export class PipPlayer {
   attachPipMedia(pipVideo) {
     this.unbindPipMedia?.();
     this.unbindPipMedia = attachStreamToVideo(pipVideo, this.stream);
+  }
+
+  replaceStream(stream) {
+    if (!stream || this._tornDown) {
+      return;
+    }
+    this.stream = stream;
+    if (this.sourceVideo && "stream" in this.sourceVideo) {
+      this.sourceVideo.stream = stream;
+    }
+    const pipVideo =
+      this.pipWindow && !this.pipWindow.closed ? this.qs("pip-video") : null;
+    if (!pipVideo) {
+      return;
+    }
+    this.attachPipMedia(pipVideo);
+    this.applyVideoAspect();
+    this.fitPipWindow({ mode: "desired" });
   }
 
   qs(id) {
