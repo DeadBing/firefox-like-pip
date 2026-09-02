@@ -1,6 +1,7 @@
 import { describe, it } from "node:test";
 import assert from "node:assert/strict";
 import {
+  applyTrackResolution,
   attachStreamToVideo,
   captureVideoStream,
   shouldUseNativeVideoPip,
@@ -80,6 +81,20 @@ describe("waitForVideoTrack", () => {
     const pending = waitForVideoTrack(stream, 200);
     listeners.find((item) => item.type === "addtrack").handler({ track });
     assert.equal(await pending, track);
+  });
+});
+
+describe("applyTrackResolution", () => {
+  it("asks the captured track for the decoded video size", async () => {
+    const constraints = [];
+    const track = {
+      applyConstraints: async (next) => {
+        constraints.push(next);
+      },
+    };
+    await applyTrackResolution(track, { videoWidth: 1920, videoHeight: 800 });
+    assert.equal(track.contentHint, "detail");
+    assert.deepEqual(constraints[0].height, { ideal: 800 });
   });
 });
 
