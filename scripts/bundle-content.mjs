@@ -10,6 +10,7 @@ const sources = [
   "lib/captions.js",
   "lib/video-utils.js",
   "lib/media-stream.js",
+  "lib/remote-bridge.js",
   "lib/remote-video.js",
   "lib/keys.js",
   "pip/player.js",

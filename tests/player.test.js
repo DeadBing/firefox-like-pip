@@ -70,6 +70,43 @@ describe("PipPlayer.open", () => {
     assert.equal(assigned[1], stream);
   });
 
+  it("does not tear down when a still-connected source fires emptied", () => {
+    const player = new PipPlayer({
+      sourceVideo: { isConnected: true },
+      settings: { pauseOnClose: true },
+      openerWindow: { setTimeout() {}, clearTimeout() {} },
+    });
+    const source = { isConnected: true, listeners: {} };
+    source.addEventListener = (type, handler) => {
+      source.listeners[type] = handler;
+    };
+    source.removeEventListener = () => {};
+    player.sourceVideo = source;
+    player.stream = { getVideoTracks: () => [], getTracks: () => [] };
+    player.bindSource();
+    source.listeners.emptied();
+    assert.equal(player.stillOpen(), true);
+    source.isConnected = false;
+    source.listeners.emptied();
+    assert.equal(player.stillOpen(), false);
+  });
+
+  it("does not stop a bridged remote MediaStream", () => {
+    const stopped = [];
+    const stream = {
+      getTracks: () => [{ stop: () => stopped.push("track") }],
+    };
+    const player = new PipPlayer({
+      sourceVideo: { stream },
+      settings: {},
+      openerWindow: { setTimeout() {}, clearTimeout() {} },
+    });
+    player.stream = stream;
+    player.stopStream();
+    assert.deepEqual(stopped, []);
+    assert.equal(player.stream, null);
+  });
+
   it("grows a clamped Document PiP window to the video aspect", () => {
     const resized = [];
     const pipWindow = {

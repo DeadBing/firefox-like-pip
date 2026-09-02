@@ -12,7 +12,12 @@ import {
   snapshotVideo,
 } from "../lib/remote-video.js";
 import { isToggleShortcut } from "../lib/keys.js";
-import { shouldUseNativeVideoPip, waitForVideoTrack } from "../lib/media-stream.js";
+import { adoptIncomingTrack } from "../lib/media-stream.js";
+import {
+  createReceiverAnswer,
+  paintPipShell,
+  shouldCloseOnIceFailure,
+} from "../lib/remote-bridge.js";
 import { PipPlayer } from "../pip/player.js";
 
 const TOGGLE_ID = "pip-addon-toggle";
@@ -262,7 +267,7 @@ function hidePlaceholder() {
   document.getElementById(PLACEHOLDER_ID)?.remove();
 }
 
-function waitForIceGathering(connection) {
+function waitForIceGathering(connection, timeoutMs = 1500) {
   if (connection.iceGatheringState === "complete") {
     return Promise.resolve();
   }
@@ -278,7 +283,7 @@ function waitForIceGathering(connection) {
     const timer = window.setTimeout(() => {
       connection.removeEventListener("icegatheringstatechange", done);
       resolve();
-    }, 1500);
+    }, timeoutMs);
     connection.addEventListener("icegatheringstatechange", done);
   });
 }
@@ -388,8 +393,12 @@ async function openRemoteSource(video) {
       relayRemote(0, "state", sessionId, snapshotVideo(video, document.title));
     const stateTimer = window.setInterval(sendState, 250);
     remoteSource = { sessionId, video, stream, connection, controller, stateTimer };
+    let iceState = connection.connectionState;
     connection.addEventListener("connectionstatechange", () => {
-      if (connection.connectionState === "failed") {
+      const next = connection.connectionState;
+      const previous = iceState;
+      iceState = next;
+      if (shouldCloseOnIceFailure(previous, next)) {
         cleanupRemoteSource();
       }
     });
@@ -409,7 +418,7 @@ async function openRemoteSource(video) {
 }
 
 async function openRemoteReceiver(message) {
-  if (window !== window.top || !("documentPictureInPicture" in window)) {
+  if (window !== window.top || IS_DOCUMENT_PIP || !("documentPictureInPicture" in window)) {
     return { ok: false, reason: "Document PiP is unavailable in the top frame" };
   }
   if (remoteReceiver) {
@@ -420,26 +429,24 @@ async function openRemoteReceiver(message) {
 
   let pipWindow = null;
   let connection = null;
+  let next = null;
   try {
     pipWindow = await window.documentPictureInPicture.requestWindow(pipRequestOptions(message.state));
+    paintPipShell(pipWindow);
     connection = new RTCPeerConnection({ iceServers: [] });
     const stream = new MediaStream();
-    const trackReady = waitForVideoTrack(stream);
     connection.addEventListener("track", (event) => {
-      if (!stream.getTracks().includes(event.track)) {
-        stream.addTrack(event.track);
-      }
+      adoptIncomingTrack(stream, event);
     });
-    await connection.setRemoteDescription(message.offer);
-    await connection.setLocalDescription(await connection.createAnswer());
-    await waitForIceGathering(connection);
-    await trackReady;
+    /* Answer before waiting for ontrack — otherwise Chrome never delivers the track. */
+    const answer = await createReceiverAnswer(connection, message.offer);
 
     const proxy = new RemoteVideo(stream, message.state, (command) =>
       relayRemote(message.sourceFrameId, "control", message.sessionId, command)
     );
     let session = null;
-    const next = new PipPlayer({
+    let iceState = connection.connectionState;
+    next = new PipPlayer({
       sourceVideo: proxy,
       settings,
       openerWindow: window,
@@ -467,15 +474,31 @@ async function openRemoteReceiver(message) {
     player = next;
     activeVideo = proxy;
     connection.addEventListener("connectionstatechange", () => {
-      if (connection.connectionState === "failed" && remoteReceiver === session) {
+      const previous = iceState;
+      iceState = connection.connectionState;
+      if (shouldCloseOnIceFailure(previous, iceState) && remoteReceiver === session) {
         next.close({ pause: false, reason: "remote-failed" });
       }
     });
-    await next.open();
-    return { ok: true, answer: connection.localDescription.toJSON() };
+    next.open().catch((error) => {
+      if (remoteReceiver === session) {
+        connection.close();
+        if (pipWindow && !pipWindow.closed) {
+          pipWindow.close();
+        }
+        remoteReceiver = null;
+        player = null;
+        activeVideo = null;
+        relayRemote(message.sourceFrameId, "close", message.sessionId);
+      }
+      console.warn("[PiP addon] Document PiP failed to attach the remote stream.", error);
+    });
+    return { ok: true, answer: connection.localDescription?.toJSON?.() ?? answer };
   } catch (error) {
     connection?.close();
-    if (pipWindow && !pipWindow.closed) {
+    if (next?.stillOpen?.()) {
+      next.close({ pause: false, reason: "remote-open-failed" });
+    } else if (pipWindow && !pipWindow.closed) {
       pipWindow.close();
     }
     remoteReceiver = null;
@@ -541,15 +564,11 @@ async function toggleVideo(video) {
   }
   if (window !== window.top) {
     cleanupRemoteSource();
-    if (shouldUseNativeVideoPip(video)) {
-      console.warn("[PiP addon] Embed video cannot be cloned; using native PiP.");
-      return launchPlayer(video, { nativeOnly: true });
-    }
     try {
       return await openRemoteSource(video);
     } catch (error) {
       console.warn("[PiP addon] Cross-frame Document PiP failed; using native PiP.", error);
-      /* Fall through to native PiP when the media stream cannot be bridged. */
+      /* Last resort: embed players often kill native PiP immediately. */
       return launchPlayer(video, { nativeOnly: true });
     }
   }
@@ -658,7 +677,7 @@ chrome.storage.onChanged.addListener((changes, area) => {
 });
 
 chrome.runtime.onMessage.addListener((message, _sender, sendResponse) => {
-  if (message?.type === "PIP_REMOTE_OPEN" && window === window.top) {
+  if (message?.type === "PIP_REMOTE_OPEN" && window === window.top && !IS_DOCUMENT_PIP) {
     openRemoteReceiver(message).then(sendResponse);
     return true;
   }
