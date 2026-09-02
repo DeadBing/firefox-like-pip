@@ -1,7 +1,16 @@
 import { formatTimestamp, progressRatio } from "../lib/format.js";
 import { captionFontScale, pageCaptionText, showingCaptionText } from "../lib/captions.js";
 import { SEEK_TIME_SECS, handlePlayerKey, isMacPlatform } from "../lib/keys.js";
-import { isLiveStream, pipWindowSize } from "../lib/video-utils.js";
+import {
+  aspectMismatch,
+  growInnerToAspect,
+  isLiveStream,
+  outerSizeForInner,
+  pipRequestOptions,
+  pipWindowSize,
+  snapInnerToAspect,
+  videoContentSize,
+} from "../lib/video-utils.js";
 
 const ICONS = {
   close:
@@ -40,7 +49,7 @@ function button(id, tooltip, icon, extraClass = "") {
 function playerMarkup(strings) {
   return `
     <div class="player-holder">
-      <video id="pip-video" playsinline></video>
+      <video id="pip-video" playsinline disablepictureinpicture></video>
       <div id="captions"></div>
       <div id="controls" showing>
         ${button("unpip", strings.unpip, ICONS.unpip)}
@@ -141,8 +150,82 @@ export class PipPlayer {
     this.strings = localize();
     this.captionTimer = 0;
     this.hideTimer = 0;
+    this.resizeSnapTimer = 0;
+    this.fittingWindow = false;
+    this.lastInnerSize = null;
     this.bound = [];
     this.sourceBound = [];
+  }
+
+  contentSize() {
+    return videoContentSize(this.sourceVideo, this.stream);
+  }
+
+  desiredInnerSize() {
+    return pipWindowSize(this.sourceVideo, undefined, undefined, this.stream);
+  }
+
+  fitPipWindow({ mode = "desired" } = {}) {
+    if (!this.pipWindow || this.pipWindow.closed || this.maximized || this.usingNative) {
+      return false;
+    }
+    const { ratio } = this.contentSize();
+    const win = this.pipWindow;
+    const innerWidth = Number(win.innerWidth) || 0;
+    const innerHeight = Number(win.innerHeight) || 0;
+    if (!innerWidth || !innerHeight) {
+      return false;
+    }
+
+    let next;
+    if (mode === "snap") {
+      next = snapInnerToAspect(innerWidth, innerHeight, ratio, this.lastInnerSize);
+    } else if (mode === "grow") {
+      next = growInnerToAspect(innerWidth, innerHeight, ratio);
+    } else {
+      next = this.desiredInnerSize();
+    }
+
+    if (!aspectMismatch(innerWidth, innerHeight, ratio)) {
+      this.lastInnerSize = { width: innerWidth, height: innerHeight };
+      return false;
+    }
+
+    const outer = outerSizeForInner(win, next.width, next.height);
+    this.fittingWindow = true;
+    try {
+      win.resizeTo(outer.width, outer.height);
+      this.lastInnerSize = {
+        width: Number(win.innerWidth) || next.width,
+        height: Number(win.innerHeight) || next.height,
+      };
+      return true;
+    } catch {
+      this.lastInnerSize = { width: innerWidth, height: innerHeight };
+      return false;
+    } finally {
+      const clear = () => {
+        this.fittingWindow = false;
+      };
+      if (typeof win.setTimeout === "function") {
+        win.setTimeout(clear, 0);
+      } else {
+        clear();
+      }
+    }
+  }
+
+  scheduleAspectSnap() {
+    if (this.fittingWindow || this.maximized || !this.pipWindow) {
+      return;
+    }
+    if (this.resizeSnapTimer) {
+      this.openerWindow.clearTimeout(this.resizeSnapTimer);
+    }
+    this.resizeSnapTimer = this.openerWindow.setTimeout(() => {
+      this.resizeSnapTimer = 0;
+      this.fitPipWindow({ mode: "snap" });
+    }, 120);
   }
 
   stillOpen() {
@@ -174,13 +257,10 @@ export class PipPlayer {
     if (existing && !existing.closed) {
       this.pipWindow = existing;
     } else {
-      const size = pipWindowSize(this.sourceVideo);
       try {
-        this.pipWindow = await window.documentPictureInPicture.requestWindow({
-          width: size.width,
-          height: size.height,
-          preferInitialWindowPlacement: false,
-        });
+        this.pipWindow = await window.documentPictureInPicture.requestWindow(
+          pipRequestOptions(this.sourceVideo, this.stream)
+        );
       } catch {
         if (!this.stillOpen()) {
           return this.abandonOpen();
@@ -218,6 +298,7 @@ export class PipPlayer {
     this.bindControls();
     this.sync();
     this.revealControls(true);
+    this.fitPipWindow({ mode: "grow" });
     return { mode: "document", window: this.pipWindow };
   }
 
@@ -271,6 +352,7 @@ export class PipPlayer {
     }
     this.bindSource();
     this.sync();
+    this.fitPipWindow({ mode: "desired" });
     return { ok: true, mode: "document" };
   }
 
@@ -311,20 +393,22 @@ export class PipPlayer {
   }
 
   bindSource() {
-    const events = [
-      "play",
-      "pause",
-      "ended",
-      "timeupdate",
-      "volumechange",
-      "ratechange",
-      "loadedmetadata",
-      "durationchange",
-    ];
+    const events = ["play", "pause", "ended", "timeupdate", "volumechange", "ratechange", "durationchange"];
     for (const type of events) {
       this.listenSource(this.sourceVideo, type, () => this.sync());
     }
+    this.listenSource(this.sourceVideo, "loadedmetadata", () => {
+      this.sync();
+      this.fitPipWindow({ mode: "desired" });
+    });
+    this.listenSource(this.sourceVideo, "resize", () => this.fitPipWindow({ mode: "desired" }));
     this.listenSource(this.sourceVideo, "emptied", () => this.close({ pause: false, reason: "emptied" }));
+    const track = this.stream?.getVideoTracks?.()[0];
+    if (track?.addEventListener) {
+      const onTrackResize = () => this.fitPipWindow({ mode: "desired" });
+      track.addEventListener("resize", onTrackResize);
+      this.sourceBound.push(() => track.removeEventListener("resize", onTrackResize));
+    }
   }
 
   bindControls() {
@@ -384,6 +468,7 @@ export class PipPlayer {
     this.listen(this.pipWindow, "pagehide", () =>
       this.teardown({ pause: this._pendingPause ?? this.settings.pauseOnClose })
     );
+    this.listen(this.pipWindow, "resize", () => this.scheduleAspectSnap());
     this.listen(controls, "mousemove", () => this.revealControls(false));
     this.listen(controls, "mouseenter", () => this.showControls());
     this.listen(controls, "mouseleave", () => {
@@ -638,6 +723,10 @@ export class PipPlayer {
     }
     if (this.hideTimer) {
       this.openerWindow.clearTimeout(this.hideTimer);
+    }
+    if (this.resizeSnapTimer) {
+      this.openerWindow.clearTimeout(this.resizeSnapTimer);
+      this.resizeSnapTimer = 0;
     }
     this.stopStream();
     if (pause) {

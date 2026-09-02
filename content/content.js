@@ -2,7 +2,7 @@ import { DEFAULT_SETTINGS, loadSettings, mergeSettings } from "../lib/settings.j
 import {
   collectVideos,
   pickBestVideo,
-  pipWindowSize,
+  pipRequestOptions,
   shouldShowPictureInPictureToggle,
   scoreVideo,
 } from "../lib/video-utils.js";
@@ -414,15 +414,10 @@ async function openRemoteReceiver(message) {
     player.close({ pause: false, reason: "replace-remote" });
   }
 
-  const size = pipWindowSize(message.state);
   let pipWindow = null;
   let connection = null;
   try {
-    pipWindow = await window.documentPictureInPicture.requestWindow({
-      width: size.width,
-      height: size.height,
-      preferInitialWindowPlacement: false,
-    });
+    pipWindow = await window.documentPictureInPicture.requestWindow(pipRequestOptions(message.state));
     connection = new RTCPeerConnection({ iceServers: [] });
     const stream = new MediaStream();
     connection.addEventListener("track", (event) => {
